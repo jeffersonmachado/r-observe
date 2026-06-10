@@ -1,0 +1,75 @@
+receivers:
+  # ── OTLP: traces, métricas e logs via SDK ──────────────────────────────────
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Nota: filelog receiver removido — requer privilégios root para acessar
+  # /var/lib/docker/containers. Logs chegam via OTLP SDK dos próprios serviços.
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  memory_limiter:
+    limit_mib: 256
+    spike_limit_mib: 64
+    check_interval: 5s
+
+  resource:
+    attributes:
+      - key: product
+        value: r-observe
+        action: insert
+
+
+exporters:
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: r_observe
+
+  loki:
+    endpoint: "http://r-observe-loki:3100/loki/api/v1/push"
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    # Traces via OTLP SDK (auto-instrumentação Node.js)
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [debug]
+
+    # Métricas via OTLP SDK
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus, debug]
+
+    # Logs via OTLP SDK
+    logs/otlp:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [loki, debug]
+
+
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      address: 0.0.0.0:8888

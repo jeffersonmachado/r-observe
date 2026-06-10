@@ -1,0 +1,78 @@
+# R-Observe Discovery — Knowledge Base
+# Arquivo: services.yml
+# Mapeamento de serviços → dependências e exporters
+
+services:
+  # ── Databases ──────────────────────────────────────────────────────────
+  - name: MySQL/MariaDB
+    ports: [3306, 33060]
+    protocol: tcp
+    dependency_type: service_database
+    exporter_port: 9104
+    exporter_job: mysql-exporter
+  - name: PostgreSQL
+    ports: [5432]
+    protocol: tcp
+    dependency_type: service_database
+    exporter_port: 9187
+    exporter_job: postgres-exporter
+  - name: MongoDB
+    ports: [27017, 27018, 27019]
+    protocol: tcp
+    dependency_type: service_database
+    exporter_port: 9216
+    exporter_job: mongodb-exporter
+  - name: Redis
+    ports: [6379, 6380]
+    protocol: tcp
+    dependency_type: service_cache
+    exporter_port: 9121
+    exporter_job: redis-exporter
+  - name: Elasticsearch
+    ports: [9200, 9300]
+    protocol: tcp
+    dependency_type: service_search
+    exporter_port: 9114
+    exporter_job: elasticsearch-exporter
+
+  # ── DNS ────────────────────────────────────────────────────────────────
+  - name: DNS
+    ports: [53]
+    protocol: udp
+    dependency_type: service_dns
+
+  # ── Observability Exporters ─────────────────────────────────────────────
+  - name: Node Exporter
+    ports: [9100]
+    protocol: tcp
+    exporter_job: node-exporter
+  - name: Prometheus
+    ports: [9090]
+    protocol: tcp
+    exporter_job: prometheus
+  - name: Nginx Exporter
+    ports: [9113]
+    protocol: tcp
+    exporter_job: nginx-exporter
+  - name: Apache Exporter
+    ports: [9117]
+    protocol: tcp
+    exporter_job: apache-exporter
+  - name: Blackbox Exporter
+    ports: [9115]
+    protocol: tcp
+    exporter_job: blackbox-exporter
+
+  # ── Message Queues ─────────────────────────────────────────────────────
+  - name: RabbitMQ
+    ports: [5672, 5671, 15672]
+    protocol: tcp
+    dependency_type: service_messaging
+    exporter_port: 9419
+    exporter_job: rabbitmq-exporter
+  - name: Kafka
+    ports: [9092, 9093, 9094]
+    protocol: tcp
+    dependency_type: service_messaging
+    exporter_port: 9308
+    exporter_job: kafka-exporter

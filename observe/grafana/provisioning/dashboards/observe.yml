@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: R-Observe Dashboards
+    orgId: 1
+    folder: R-Observe
+    folderUid: r-observe
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

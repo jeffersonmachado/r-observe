@@ -1,0 +1,125 @@
+groups:
+
+  # ── Disponibilidade dos serviços ────────────────────────────────────────────
+  - name: r-observe.availability
+    rules:
+
+      - alert: RObserveAPIDown
+        expr: up{job="r-observe-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: r-observe-api
+        annotations:
+          summary: "R-Observe API está down"
+          description: "O serviço r-observe-api não está respondendo ao Prometheus há mais de 2 minutos."
+
+      - alert: RObserveWorkerDown
+        expr: up{job="r-observe-worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: r-observe-worker
+        annotations:
+          summary: "R-Observe Worker está down"
+          description: "O serviço r-observe-worker não está respondendo ao Prometheus há mais de 2 minutos."
+
+      - alert: RObserveAIDown
+        expr: up{job="r-observe-ai"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: r-observe-ai
+        annotations:
+          summary: "R-Observe AI está down"
+          description: "O serviço r-observe-ai não está respondendo. Incidentes continuarão sendo criados, mas sem análise por IA."
+
+      - alert: RObserveAgentDown
+        expr: up{job="r-observe-agent"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: r-observe-agent
+        annotations:
+          summary: "R-Observe Agent está down"
+          description: "O agente local parou de reportar métricas. Checks de container e disco não estão sendo executados."
+
+  # ── Worker ──────────────────────────────────────────────────────────────────
+  - name: r-observe.worker
+    rules:
+
+      - alert: RObserveWorkerErrorRateHigh
+        expr: |
+          rate(r_observe_worker_errors_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: r-observe-worker
+        annotations:
+          summary: "Worker com taxa de erros elevada"
+          description: "O worker está falhando em mais de 3 eventos por minuto nos últimos 5 minutos."
+
+      - alert: RObserveWorkerNotProcessing
+        expr: |
+          rate(r_observe_events_received_total[10m]) > 0
+          and
+          rate(r_observe_worker_events_processed_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+          service: r-observe-worker
+        annotations:
+          summary: "Worker parou de processar eventos"
+          description: "Eventos estão sendo recebidos pela API mas o worker não está processando nenhum nos últimos 10 minutos."
+
+  # ── Ingestão de eventos ─────────────────────────────────────────────────────
+  - name: r-observe.events
+    rules:
+
+      - alert: IcingaEventsNotArriving
+        expr: |
+          (
+            increase(r_observe_events_received_total{source="icinga"}[1h]) == 0
+          )
+          unless
+          (
+            absent(r_observe_events_received_total{source="icinga"})
+          )
+        for: 60m
+        labels:
+          severity: warning
+          service: icinga2
+        annotations:
+          summary: "Nenhum evento Icinga recebido na última hora"
+          description: "A R-Observe API não recebeu eventos do Icinga2 nos últimos 60 minutos. Verifique se o Icinga2 está ativo e se as notificações estão configuradas."
+
+      - alert: RObserveAPIErrorRateHigh
+        expr: |
+          rate(r_observe_api_http_requests_total{status=~"5.."}[5m])
+          /
+          rate(r_observe_api_http_requests_total[5m])
+          > 0.10
+        for: 5m
+        labels:
+          severity: warning
+          service: r-observe-api
+        annotations:
+          summary: "Taxa de erros HTTP 5xx alta na API"
+          description: "Mais de 10% das requisições à API estão retornando erros 5xx nos últimos 5 minutos."
+
+  # ── Agente ──────────────────────────────────────────────────────────────────
+  - name: r-observe.agent
+    rules:
+
+      - alert: RObserveAgentNotChecking
+        expr: |
+          increase(r_observe_agent_checks_total[10m]) == 0
+          and
+          up{job="r-observe-agent"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          service: r-observe-agent
+        annotations:
+          summary: "Agent está up mas parou de executar checks"
+          description: "O agente está respondendo ao Prometheus mas não executou nenhum ciclo de checks nos últimos 10 minutos."

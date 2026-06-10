@@ -1,0 +1,612 @@
+openapi: "3.0.3"
+info:
+  title: R-Observe Discovery API
+  description: |
+    Enterprise Continuous Autonomous Discovery Engine.
+    Descobre, classifica e mapeia ativos de rede automaticamente.
+
+    ## Versionamento
+    - Cabeçalho `X-API-Version: 1.0.0` em todas as respostas
+    - Rotas canônicas sob `/v1/api/discovery/*`
+    - Rotas legadas sem `/v1` mantidas para compatibilidade
+
+    ## Autenticação
+    - `X-Internal-Token` header ou `Authorization: Bearer <token>`
+    - Sessões web gerenciadas pelo API proxy (`r-observe/api`)
+
+    ## Paginação
+    - Cursor-based: `?limit=50&after=<cursor>&sort=asc|desc`
+    - Resposta inclui `pagination.has_more` e `pagination.next_cursor`
+  version: "1.0.0"
+  contact:
+    name: R-Observe Team
+
+servers:
+  - url: http://observe-discovery:3010
+    description: Discovery (interno)
+  - url: https://observe-api/observe/api
+    description: API Proxy (externo)
+
+tags:
+  - name: Health
+  - name: Scans
+    description: Execução de varreduras de descoberta
+  - name: Assets
+    description: Ativos descobertos e classificados
+  - name: Policies
+    description: Políticas de scan
+  - name: Targets
+    description: Alvos de varredura
+  - name: Topology
+    description: Grafo de topologia de rede
+  - name: Findings
+    description: Achados e eventos de descoberta
+  - name: Fingerprints
+    description: Fingerprints de serviços detectados
+  - name: Schedules
+    description: Agendamento de scans automáticos (Enterprise)
+  - name: Quotas
+    description: Limites de recursos por tenant (Enterprise)
+  - name: Audit
+    description: Trilha de auditoria (Enterprise)
+
+paths:
+  # ─── Health ──────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, degraded] }
+                  service: { type: string }
+                  version: { type: string }
+
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus text format
+
+  # ─── Scan ────────────────────────────────────────────────────────────────────
+  /api/discovery/scan:
+    post:
+      tags: [Scans]
+      summary: Dispara uma varredura de descoberta
+      security: [{ internalToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile:
+                  type: string
+                  enum: [safe, balanced, aggressive]
+                  default: safe
+                targets:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      address: { type: string }
+                      discovery_type: { type: string, enum: [ip, hostname, cidr, range] }
+                tenant_id: { type: string }
+                site_id: { type: string }
+                edge_id: { type: string }
+                policy_id: { type: string }
+      responses:
+        '202':
+          description: Scan enfileirado ou iniciado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued: { type: boolean }
+                  run_id: { type: string }
+                  queue: { type: string }
+
+  /api/discovery/progress:
+    get:
+      tags: [Scans]
+      summary: Progresso do scan atual
+      responses:
+        '200':
+          description: Estado do pipeline de descoberta
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active: { type: boolean }
+                  stage: { type: string }
+                  scanned: { type: integer }
+                  total_targets: { type: integer }
+                  discovered: { type: integer }
+
+  # ─── Runs ────────────────────────────────────────────────────────────────────
+  /api/discovery/runs:
+    get:
+      tags: [Scans]
+      summary: Lista execuções de descoberta
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: tenant_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: after
+          in: query
+          description: Cursor (ISO timestamp)
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [asc, desc], default: desc }
+      responses:
+        '200':
+          description: Lista paginada de runs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedResponse'
+
+  # ─── Assets ──────────────────────────────────────────────────────────────────
+  /api/discovery/assets:
+    get:
+      tags: [Assets]
+      summary: Lista ativos descobertos
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/EdgeId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/After'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Lista paginada de ativos
+
+  /api/discovery/assets/{id}:
+    patch:
+      tags: [Assets]
+      summary: Atualiza ciclo de vida de um ativo
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lifecycle_state:
+                  type: string
+                  enum: [discovered, approved, monitored, ignored, quarantined, disappeared]
+                criticality:
+                  type: string
+                  enum: [low, medium, high, critical]
+                display_name: { type: string }
+      responses:
+        '200':
+          description: Ativo atualizado
+
+  # ─── Policies ────────────────────────────────────────────────────────────────
+  /api/discovery/policies:
+    get:
+      tags: [Policies]
+      summary: Lista políticas de scan
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de políticas
+    post:
+      tags: [Policies]
+      summary: Cria uma política de scan
+      security: [{ internalToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyCreate'
+      responses:
+        '201':
+          description: Política criada
+
+  /api/discovery/policies/{id}:
+    patch:
+      tags: [Policies]
+      summary: Atualiza uma política
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyUpdate'
+      responses:
+        '200':
+          description: Política atualizada
+    delete:
+      tags: [Policies]
+      summary: Remove uma política
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Política removida
+
+  # ─── Targets ─────────────────────────────────────────────────────────────────
+  /api/discovery/targets:
+    get:
+      tags: [Targets]
+      summary: Lista alvos de scan
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/After'
+      responses:
+        '200':
+          description: Lista paginada de targets
+    post:
+      tags: [Targets]
+      summary: Adiciona um alvo de scan
+      security: [{ internalToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string, description: "IP, hostname, CIDR ou range" }
+                discovery_type: { type: string, enum: [ip, hostname, cidr, range], default: ip }
+                label: { type: string }
+                policy_id: { type: string, format: uuid }
+                tenant_id: { type: string }
+      responses:
+        '201':
+          description: Target criado
+        '429':
+          description: Quota de targets excedida
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotaExceeded'
+
+  /api/discovery/targets/{id}:
+    patch:
+      tags: [Targets]
+      summary: Atualiza um target
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Target atualizado
+    delete:
+      tags: [Targets]
+      summary: Remove um target
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Target removido
+
+  # ─── Topology ────────────────────────────────────────────────────────────────
+  /api/discovery/topology:
+    get:
+      tags: [Topology]
+      summary: Lista arestas de topologia
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de arestas de topologia
+
+  # ─── Findings ────────────────────────────────────────────────────────────────
+  /api/discovery/findings:
+    get:
+      tags: [Findings]
+      summary: Lista achados de descoberta
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: run_id
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de findings
+
+  # ─── Fingerprints ────────────────────────────────────────────────────────────
+  /api/discovery/fingerprints:
+    get:
+      tags: [Fingerprints]
+      summary: Lista fingerprints de serviços
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de fingerprints
+
+  # ─── History ─────────────────────────────────────────────────────────────────
+  /api/discovery/history:
+    get:
+      tags: [Assets]
+      summary: Histórico de mudanças de um ativo
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: asset_id
+          in: query
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de mudanças
+
+  # ─── Schedules (Enterprise) ──────────────────────────────────────────────────
+  /api/discovery/schedules:
+    get:
+      tags: [Schedules]
+      summary: Lista agendamentos de scan
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de schedules
+    post:
+      tags: [Schedules]
+      summary: Cria um agendamento de scan
+      security: [{ internalToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, cron_expression]
+              properties:
+                name: { type: string, description: "Nome descritivo" }
+                cron_expression: { type: string, description: "Expressão cron (5 campos). Ex: '0 */6 * * *' = a cada 6 horas" }
+                policy_id: { type: string, format: uuid }
+                profile_override: { type: string, enum: [safe, balanced, aggressive] }
+                enabled: { type: boolean, default: true }
+                tenant_id: { type: string }
+      responses:
+        '201':
+          description: Schedule criado
+
+  /api/discovery/schedules/{id}:
+    patch:
+      tags: [Schedules]
+      summary: Atualiza um schedule
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Schedule atualizado
+    delete:
+      tags: [Schedules]
+      summary: Remove um schedule
+      security: [{ internalToken: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Schedule removido
+
+  # ─── Quotas (Enterprise) ─────────────────────────────────────────────────────
+  /api/discovery/quotas:
+    get:
+      tags: [Quotas]
+      summary: Consulta quotas do tenant
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Quota do tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quota:
+                    $ref: '#/components/schemas/TenantQuota'
+
+  # ─── Audit (Enterprise) ──────────────────────────────────────────────────────
+  /api/discovery/audit:
+    get:
+      tags: [Audit]
+      summary: Consulta trilha de auditoria
+      security: [{ internalToken: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: action
+          in: query
+          schema: { type: string }
+          description: "Filtrar por ação (ex: 'policy.create', 'scan.trigger')"
+        - name: actor
+          in: query
+          schema: { type: string }
+        - name: resource_type
+          in: query
+          schema: { type: string }
+        - name: resource_id
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/After'
+      responses:
+        '200':
+          description: Lista paginada de eventos de auditoria
+
+  # ─── Prometheus SD ───────────────────────────────────────────────────────────
+  /api/discovery/prometheus/http-sd:
+    get:
+      tags: [Assets]
+      summary: Prometheus HTTP Service Discovery
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Target groups para Prometheus
+
+components:
+  securitySchemes:
+    internalToken:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+      description: Token interno de serviço
+
+  parameters:
+    TenantId:
+      name: tenant_id
+      in: query
+      schema: { type: string, default: "default" }
+    SiteId:
+      name: site_id
+      in: query
+      schema: { type: string, default: "default-site" }
+    EdgeId:
+      name: edge_id
+      in: query
+      schema: { type: string, default: "central" }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, maximum: 500 }
+      description: Itens por página
+    After:
+      name: after
+      in: query
+      schema: { type: string }
+      description: Cursor para próxima página (ISO timestamp)
+    Sort:
+      name: sort
+      in: query
+      schema: { type: string, enum: [asc, desc], default: desc }
+
+  schemas:
+    PaginatedResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: {}
+        pagination:
+          type: object
+          properties:
+            limit: { type: integer }
+            sort: { type: string }
+            returned: { type: integer }
+            has_more: { type: boolean }
+            cursors:
+              type: object
+              properties:
+                first: { type: string }
+                last: { type: string }
+            next_cursor: { type: string }
+
+    PolicyCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        scan_profile: { type: string, enum: [safe, balanced, aggressive], default: safe }
+        active_enabled: { type: boolean, default: true }
+        passive_enabled: { type: boolean, default: true }
+        allowed_ranges: { type: array, items: { type: string } }
+        blocked_ranges: { type: array, items: { type: string } }
+        max_rate_per_minute: { type: integer, default: 300 }
+        auto_prometheus_sd: { type: boolean, default: true }
+        auto_icinga_sync: { type: boolean, default: false }
+        tenant_id: { type: string }
+
+    PolicyUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        scan_profile: { type: string, enum: [safe, balanced, aggressive] }
+        active_enabled: { type: boolean }
+        passive_enabled: { type: boolean }
+        allowed_ranges: { type: array, items: { type: string } }
+        blocked_ranges: { type: array, items: { type: string } }
+        max_rate_per_minute: { type: integer }
+        host_timeout_ms: { type: integer }
+        max_concurrency: { type: integer }
+        allow_udp: { type: boolean }
+        auto_prometheus_sd: { type: boolean }
+        auto_icinga_sync: { type: boolean }
+
+    TenantQuota:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        max_assets: { type: integer, default: 5000 }
+        max_targets: { type: integer, default: 500 }
+        max_scans_per_hour: { type: integer, default: 10 }
+        max_concurrent_scans: { type: integer, default: 1 }
+        override: { type: boolean }
+
+    QuotaExceeded:
+      type: object
+      properties:
+        error: { type: string, example: "Quota exceeded" }
+        resource: { type: string }
+        current: { type: integer }
+        max: { type: integer }
+        retry_after: { type: string }

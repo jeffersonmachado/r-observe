@@ -1,0 +1,48 @@
+name: release-hardening
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            r-observe/discovery/package-lock.json
+
+      - name: Clean dist
+        run: npm run dist:clean:release
+
+      - name: Enterprise hardened release pipeline
+        run: npm run release:ci:hardened
+
+      - name: Upload release reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-hardening-reports
+          path: |
+            dist/*manifest*
+            dist/*provenance*
+            dist/*attestation*
+            dist/*validate*
+            dist/*smoke*
+            dist/*gate*
+            dist/*audit*
+            dist/*timing*
+            dist/*zip.log
+            dist/*.sha256

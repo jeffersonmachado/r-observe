@@ -1,0 +1,87 @@
+# SNMP Exporter configuration — physical layer (L1) metrics
+# Generates: ifSpeed, ifOperStatus, ifInErrors, ifOutErrors, ifHCInOctets, ifHCOutOctets
+
+modules:
+  # ── Standard IF-MIB (all vendors) ───────────────────────────────────────
+  if_mib:
+    walk:
+      - 1.3.6.1.2.1.2.2.1.1   # ifIndex
+      - 1.3.6.1.2.1.2.2.1.2   # ifDescr
+      - 1.3.6.1.2.1.2.2.1.3   # ifType
+      - 1.3.6.1.2.1.2.2.1.4   # ifMtu
+      - 1.3.6.1.2.1.2.2.1.5   # ifSpeed
+      - 1.3.6.1.2.1.2.2.1.7   # ifAdminStatus
+      - 1.3.6.1.2.1.2.2.1.8   # ifOperStatus
+      - 1.3.6.1.2.1.2.2.1.10  # ifInOctets
+      - 1.3.6.1.2.1.2.2.1.14  # ifInErrors
+      - 1.3.6.1.2.1.2.2.1.16  # ifOutOctets
+      - 1.3.6.1.2.1.2.2.1.20  # ifOutErrors
+      - 1.3.6.1.2.1.31.1.1.1.1   # ifName
+      - 1.3.6.1.2.1.31.1.1.1.6   # ifHCInOctets (64-bit)
+      - 1.3.6.1.2.1.31.1.1.1.10  # ifHCOutOctets (64-bit)
+      - 1.3.6.1.2.1.31.1.1.1.15  # ifHighSpeed
+    metrics:
+      - name: ifOperStatus
+        oid: 1.3.6.1.2.1.2.2.1.8
+        type: gauge
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+        lookups:
+          - labels: [ifIndex]
+            labelname: ifName
+            oid: 1.3.6.1.2.1.31.1.1.1.1
+          - labels: [ifIndex]
+            labelname: ifDescr
+            oid: 1.3.6.1.2.1.2.2.1.2
+          - labels: [ifIndex]
+            labelname: ifType
+            oid: 1.3.6.1.2.1.2.2.1.3
+      - name: ifSpeed
+        oid: 1.3.6.1.2.1.2.2.1.5
+        type: gauge
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+      - name: ifInErrors
+        oid: 1.3.6.1.2.1.2.2.1.14
+        type: counter
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+      - name: ifOutErrors
+        oid: 1.3.6.1.2.1.2.2.1.20
+        type: counter
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+      - name: ifHCInOctets
+        oid: 1.3.6.1.2.1.31.1.1.1.6
+        type: counter
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+      - name: ifHCOutOctets
+        oid: 1.3.6.1.2.1.31.1.1.1.10
+        type: counter
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+      - name: ifHighSpeed
+        oid: 1.3.6.1.2.1.31.1.1.1.15
+        type: gauge
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+      - name: ifMtu
+        oid: 1.3.6.1.2.1.2.2.1.4
+        type: gauge
+        indexes:
+          - labelname: ifIndex
+            type: Integer
+      - name: ifAdminStatus
+        oid: 1.3.6.1.2.1.2.2.1.7
+        type: gauge
+        indexes:
+          - labelname: ifIndex
+            type: Integer

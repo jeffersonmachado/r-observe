@@ -1,0 +1,30 @@
+{
+  "name": "r-observe",
+  "private": true,
+  "version": "0.1.0",
+  "description": "R-Observe — ambiente de desenvolvimento local",
+  "scripts": {
+    "dev": "concurrently --names \"api,discovery,ai,frontend\" --prefix-colors \"cyan,green,yellow,magenta\" --kill-others-on-fail \"NODE_ENV=development PORT=${OBSERVE_API_PORT:-3009} AI_SERVICE_URL=${AI_SERVICE_URL:-http://127.0.0.1:3011} DISCOVERY_SERVICE_URL=${DISCOVERY_SERVICE_URL:-http://127.0.0.1:3010} npm run dev --prefix api\" \"NODE_ENV=development PORT=${OBSERVE_DISCOVERY_PORT:-3010} DISCOVERY_SCAN_QUEUE_ENABLED=${DISCOVERY_SCAN_QUEUE_ENABLED:-false} DISCOVERY_PASSIVE_LISTENERS_ENABLED=${DISCOVERY_PASSIVE_LISTENERS_ENABLED:-false} DISCOVERY_DOCKER_ENABLED=${DISCOVERY_DOCKER_ENABLED:-false} npm run dev --prefix discovery\" \"NODE_ENV=development PORT=${OBSERVE_AI_PORT:-3011} AI_PROVIDER=${R_OBSERVE_AI_PROVIDER:-mock} npm run dev --prefix ai\" \"npm run dev:frontend\"",
+    "dev:api": "NODE_ENV=development PORT=${OBSERVE_API_PORT:-3009} AI_SERVICE_URL=${AI_SERVICE_URL:-http://127.0.0.1:3011} DISCOVERY_SERVICE_URL=${DISCOVERY_SERVICE_URL:-http://127.0.0.1:3010} npm run dev --prefix api",
+    "dev:ai": "NODE_ENV=development PORT=${OBSERVE_AI_PORT:-3011} AI_PROVIDER=${R_OBSERVE_AI_PROVIDER:-mock} npm run dev --prefix ai",
+    "dev:discovery": "NODE_ENV=development PORT=${OBSERVE_DISCOVERY_PORT:-3010} DISCOVERY_SCAN_QUEUE_ENABLED=${DISCOVERY_SCAN_QUEUE_ENABLED:-false} DISCOVERY_PASSIVE_LISTENERS_ENABLED=${DISCOVERY_PASSIVE_LISTENERS_ENABLED:-false} DISCOVERY_DOCKER_ENABLED=${DISCOVERY_DOCKER_ENABLED:-false} npm run dev --prefix discovery",
+    "dev:frontend": "cd api && ./node_modules/.bin/vite --host 127.0.0.1 --port ${VITE_DEV_PORT:-5177}",
+    "discovery:test": "npm --prefix ./discovery test",
+    "discovery:lint": "bash ../scripts/discovery/discovery-lint.sh",
+    "discovery:audit": "bash ../scripts/discovery/discovery-audit.sh",
+    "discovery:migrations:audit": "bash ../scripts/discovery/discovery-migrations-audit.sh",
+    "discovery:doctor": "node ../scripts/discovery/discovery-doctor.js",
+    "discovery:smoke": "bash ../scripts/discovery/discovery-smoke.sh",
+    "discovery:smoke:real": "bash ../scripts/discovery/discovery-smoke-real.sh",
+    "discovery:integration": "bash ../scripts/discovery/discovery-integration.sh",
+    "discovery:gate": "bash ../scripts/discovery/discovery-gate.sh",
+    "discovery:gate:enterprise": "bash ../scripts/discovery/discovery-enterprise-smoke.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "@opentelemetry/auto-instrumentations-node": "^0.76.0",
+    "@opentelemetry/sdk-node": "^0.218.0"
+  }
+}

@@ -1,0 +1,358 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": { "list": [] },
+  "description": "R-Observe — Eventos, incidentes e integração Icinga2",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+
+    { "collapsed": false, "gridPos": {"h":1,"w":24,"x":0,"y":0},
+      "id": 100, "title": "Ingestão de Eventos", "type": "row" },
+
+    {
+      "id": 1,
+      "title": "Eventos recebidos (total)",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":0,"y":1},
+      "options": { "reduceOptions": {"calcs":["lastNotNull"]}, "orientation":"auto",
+                   "textMode":"auto", "colorMode":"background" },
+      "fieldConfig": {
+        "defaults": { "color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[{"color":"blue","value":null}]} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "sum(r_observe_events_received_total)",
+        "legendFormat": "Total"
+      }]
+    },
+
+    {
+      "id": 2,
+      "title": "Eventos Icinga (total)",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":4,"y":1},
+      "options": { "reduceOptions": {"calcs":["lastNotNull"]}, "colorMode":"background" },
+      "fieldConfig": {
+        "defaults": { "color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[
+            {"color":"green","value":null},{"color":"orange","value":0}
+          ]} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "sum(r_observe_events_received_total{source=\"icinga\"}) or vector(0)",
+        "legendFormat": "Icinga"
+      }]
+    },
+
+    {
+      "id": 3,
+      "title": "Eventos processados pelo worker",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":8,"y":1},
+      "options": { "reduceOptions": {"calcs":["lastNotNull"]}, "colorMode":"background" },
+      "fieldConfig": {
+        "defaults": { "color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[{"color":"green","value":null}]} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "r_observe_worker_events_processed_total",
+        "legendFormat": "Processados"
+      }]
+    },
+
+    {
+      "id": 4,
+      "title": "Erros do worker",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":12,"y":1},
+      "options": { "reduceOptions": {"calcs":["lastNotNull"]}, "colorMode":"background" },
+      "fieldConfig": {
+        "defaults": { "color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[
+            {"color":"green","value":null},{"color":"orange","value":1},{"color":"red","value":10}
+          ]} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "r_observe_worker_errors_total",
+        "legendFormat": "Erros"
+      }]
+    },
+
+    {
+      "id": 5,
+      "title": "Req. API (último 1m) — erros 5xx",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":16,"y":1},
+      "options": { "reduceOptions": {"calcs":["lastNotNull"]}, "colorMode":"background" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[
+            {"color":"green","value":null},{"color":"red","value":0.01}
+          ]}
+        }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "sum(rate(r_observe_api_http_requests_total{status=~\"5..\"}[1m])) or vector(0)",
+        "legendFormat": "5xx/s"
+      }]
+    },
+
+    {
+      "id": 6,
+      "title": "Alertas ativos",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":20,"y":1},
+      "options": { "reduceOptions": {"calcs":["lastNotNull"]}, "colorMode":"background" },
+      "fieldConfig": {
+        "defaults": { "color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[
+            {"color":"green","value":null},{"color":"orange","value":1},{"color":"red","value":3}
+          ]} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "count(ALERTS{alertstate=\"firing\"}) or vector(0)",
+        "legendFormat": "Firing"
+      }]
+    },
+
+    { "collapsed": false, "gridPos": {"h":1,"w":24,"x":0,"y":5},
+      "id": 101, "title": "Séries Temporais", "type": "row" },
+
+    {
+      "id": 10,
+      "title": "Taxa de eventos recebidos por origem",
+      "type": "timeseries",
+      "gridPos": {"h":8,"w":12,"x":0,"y":6},
+      "options": { "tooltip":{"mode":"multi"} },
+      "fieldConfig": {
+        "defaults": { "unit":"reqps", "custom":{"lineWidth":2} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "sum by (source) (rate(r_observe_events_received_total[2m]))",
+        "legendFormat": "{{source}}"
+      }]
+    },
+
+    {
+      "id": 11,
+      "title": "Worker: processados vs erros",
+      "type": "timeseries",
+      "gridPos": {"h":8,"w":12,"x":12,"y":6},
+      "options": { "tooltip":{"mode":"multi"} },
+      "fieldConfig": {
+        "defaults": { "unit":"reqps", "custom":{"lineWidth":2} },
+        "overrides": [{
+          "matcher":{"id":"byName","options":"Erros"},
+          "properties":[{"id":"color","value":{"fixedColor":"red","mode":"fixed"}}]
+        }]
+      },
+      "targets": [
+        {
+          "datasource": {"type":"prometheus","uid":"${datasource}"},
+          "expr": "rate(r_observe_worker_events_processed_total[2m])",
+          "legendFormat": "Processados/s"
+        },
+        {
+          "datasource": {"type":"prometheus","uid":"${datasource}"},
+          "expr": "rate(r_observe_worker_errors_total[2m])",
+          "legendFormat": "Erros/s"
+        }
+      ]
+    },
+
+    {
+      "id": 12,
+      "title": "Requisições à API por status HTTP",
+      "type": "timeseries",
+      "gridPos": {"h":8,"w":12,"x":0,"y":14},
+      "options": { "tooltip":{"mode":"multi"} },
+      "fieldConfig": {
+        "defaults": { "unit":"reqps", "custom":{"lineWidth":2} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "sum by (status) (rate(r_observe_api_http_requests_total[2m]))",
+        "legendFormat": "HTTP {{status}}"
+      }]
+    },
+
+    {
+      "id": 13,
+      "title": "Eventos Icinga recebidos (acumulado / hora)",
+      "type": "timeseries",
+      "gridPos": {"h":8,"w":12,"x":12,"y":14},
+      "options": { "tooltip":{"mode":"multi"} },
+      "fieldConfig": {
+        "defaults": { "custom":{"lineWidth":2} }
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "increase(r_observe_events_received_total{source=\"icinga\"}[1h])",
+        "legendFormat": "Icinga events/h"
+      }]
+    },
+
+    { "collapsed": false, "gridPos": {"h":1,"w":24,"x":0,"y":22},
+      "id": 103, "title": "Remediações", "type": "row" },
+
+    {
+      "id": 30,
+      "title": "Auto-executadas",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":0,"y":23},
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background"},
+      "fieldConfig": {
+        "defaults": {"color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[{"color":"green","value":null}]}}
+      },
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},
+        "expr":"r_observe_remediations_total{outcome=\"auto_executed\"} or vector(0)",
+        "legendFormat":"Auto"}]
+    },
+
+    {
+      "id": 31,
+      "title": "Pendentes de aprovação (total)",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":4,"y":23},
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background"},
+      "fieldConfig": {
+        "defaults": {"color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[
+            {"color":"green","value":null},{"color":"orange","value":1},{"color":"red","value":5}]}}
+      },
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},
+        "expr":"r_observe_remediations_total{outcome=\"pending_approval\"} or vector(0)",
+        "legendFormat":"Pendentes"}]
+    },
+
+    {
+      "id": 32,
+      "title": "Aprovadas por humano",
+      "type": "stat",
+      "gridPos": {"h":4,"w":4,"x":8,"y":23},
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background"},
+      "fieldConfig": {
+        "defaults": {"color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[{"color":"blue","value":null}]}}
+      },
+      "targets": [{"datasource":{"type":"prometheus","uid":"${datasource}"},
+        "expr":"r_observe_remediations_total{outcome=\"approved_by_human\"} or vector(0)",
+        "legendFormat":"Aprovadas"}]
+    },
+
+    {
+      "id": 33,
+      "title": "Sucesso vs. Falha (execuções)",
+      "type": "stat",
+      "gridPos": {"h":4,"w":6,"x":12,"y":23},
+      "options": {"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background","orientation":"horizontal"},
+      "fieldConfig": {
+        "defaults": {"color":{"mode":"thresholds"},
+          "thresholds":{"mode":"absolute","steps":[{"color":"green","value":null}]}},
+        "overrides": [
+          {"matcher":{"id":"byName","options":"Falhas"},
+           "properties":[{"id":"thresholds","value":{"mode":"absolute","steps":[
+             {"color":"green","value":null},{"color":"red","value":1}]}}]}
+        ]
+      },
+      "targets": [
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},
+          "expr":"r_observe_remediations_total{outcome=\"execution_success\"} or vector(0)",
+          "legendFormat":"Sucessos"},
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},
+          "expr":"r_observe_remediations_total{outcome=\"execution_failed\"} or vector(0)",
+          "legendFormat":"Falhas"}
+      ]
+    },
+
+    {
+      "id": 34,
+      "title": "Taxa de remediações (auto vs. pendente vs. executada)",
+      "type": "timeseries",
+      "gridPos": {"h":8,"w":24,"x":0,"y":27},
+      "options": {"tooltip":{"mode":"multi"}},
+      "fieldConfig": {"defaults":{"unit":"short","custom":{"lineWidth":2}}},
+      "targets": [
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},
+          "expr":"rate(r_observe_remediations_total{outcome=\"auto_executed\"}[5m])",
+          "legendFormat":"Auto-exec/s"},
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},
+          "expr":"rate(r_observe_remediations_total{outcome=\"pending_approval\"}[5m])",
+          "legendFormat":"Pendente/s"},
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},
+          "expr":"rate(r_observe_remediations_total{outcome=\"execution_success\"}[5m])",
+          "legendFormat":"Sucesso/s"},
+        {"datasource":{"type":"prometheus","uid":"${datasource}"},
+          "expr":"rate(r_observe_remediations_total{outcome=\"execution_failed\"}[5m])",
+          "legendFormat":"Falha/s"}
+      ]
+    },
+
+    { "collapsed": false, "gridPos": {"h":1,"w":24,"x":0,"y":35},
+      "id": 102, "title": "Alertas Prometheus", "type": "row" },
+
+    {
+      "id": 20,
+      "title": "Alertas disparados",
+      "type": "table",
+      "gridPos": {"h":7,"w":24,"x":0,"y":23},
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {"matcher":{"id":"byName","options":"alertname"}, "properties":[{"id":"displayName","value":"Alerta"}]},
+          {"matcher":{"id":"byName","options":"severity"},  "properties":[{"id":"displayName","value":"Severidade"}]},
+          {"matcher":{"id":"byName","options":"service"},   "properties":[{"id":"displayName","value":"Serviço"}]},
+          {"matcher":{"id":"byName","options":"summary"},   "properties":[{"id":"displayName","value":"Resumo"}]}
+        ]
+      },
+      "targets": [{
+        "datasource": {"type":"prometheus","uid":"${datasource}"},
+        "expr": "ALERTS{alertstate=\"firing\"}",
+        "instant": true,
+        "legendFormat": "",
+        "format": "table"
+      }],
+      "transformations": [
+        {"id":"organize","options":{"excludeByName":{"Time":true,"Value":true,"__name__":true,"alertstate":true,"job":true,"instance":true}}}
+      ]
+    }
+
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["r-observe","icinga","monitoring"],
+  "templating": {
+    "list": [{
+      "current": {},
+      "hide": 0,
+      "includeAll": false,
+      "name": "datasource",
+      "options": [],
+      "query": "prometheus",
+      "refresh": 1,
+      "type": "datasource",
+      "label": "Prometheus"
+    }]
+  },
+  "time": {"from": "now-3h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "R-Observe — Eventos e Icinga",
+  "uid": "r-observe-icinga",
+  "version": 1
+}

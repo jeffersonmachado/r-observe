@@ -1,0 +1,774 @@
+openapi: "3.0.3"
+info:
+  title: R-Observe API
+  description: |
+    API principal do R-Observe — plataforma de AIOps com observabilidade,
+    descoberta de rede, análise de incidentes com IA e remediação automatizada.
+  version: "0.1.0"
+  contact:
+    name: Results Sistemas de Informática
+
+servers:
+  - url: /observe/api
+    description: Base path padrão (via Nginx reverse proxy)
+
+security:
+  - BearerAuth: []
+  - CookieAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Token interno (x-internal-token) ou JWT assinado
+    CookieAuth:
+      type: apiKey
+      in: cookie
+      name: observe_session
+
+  schemas:
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        service:
+          type: string
+        version:
+          type: string
+
+    Status:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        components:
+          type: object
+          properties:
+            api:
+              type: string
+            db:
+              type: string
+            redis:
+              type: string
+
+    Host:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        address:
+          type: string
+        status:
+          type: string
+          enum: [up, down, unknown]
+        last_check:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    HostCreate:
+      type: object
+      required: [name, address]
+      properties:
+        name:
+          type: string
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
+        address:
+          type: string
+        display_name:
+          type: string
+        vars:
+          type: object
+
+    Incident:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        severity:
+          type: string
+          enum: [critical, warning, info, unknown]
+        status:
+          type: string
+          enum: [open, resolved]
+        source:
+          type: string
+        host_id:
+          type: string
+          format: uuid
+        ai_summary:
+          type: string
+        ai_cause:
+          type: string
+        ai_suggestion:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+
+    EventInput:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+        source:
+          type: string
+        host:
+          type: string
+        service:
+          type: string
+        severity:
+          type: string
+        message:
+          type: string
+
+    AISettings:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [openai, deepseek, anthropic, mock]
+        model:
+          type: string
+        api_key:
+          type: string
+        has_api_key:
+          type: boolean
+        persisted_in_db:
+          type: boolean
+        effective_model:
+          type: string
+
+    AIModels:
+      type: object
+      properties:
+        provider:
+          type: string
+        models:
+          type: array
+          items:
+            type: string
+        auto:
+          type: string
+        source:
+          type: string
+          enum: [api, static]
+
+    Remediation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        incident_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+        params:
+          type: object
+        reason:
+          type: string
+        status:
+          type: string
+          enum: [pending_approval, approved, rejected, executing, executed, failed]
+        confidence_score:
+          type: number
+        auto_executed:
+          type: boolean
+        requested_at:
+          type: string
+          format: date-time
+
+    Contact:
+      type: object
+      properties:
+        name:
+          type: string
+        active:
+          type: integer
+        admin:
+          type: boolean
+        ctime:
+          type: string
+          format: date-time
+        mtime:
+          type: string
+          format: date-time
+
+    ContactCreate:
+      type: object
+      required: [name, password]
+      properties:
+        name:
+          type: string
+          pattern: '^[a-zA-Z0-9_.@-]{2,128}$'
+        password:
+          type: string
+          minLength: 8
+        admin:
+          type: boolean
+        active:
+          type: boolean
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    LoginResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        user:
+          type: object
+          properties:
+            name:
+              type: string
+            role:
+              type: string
+              enum: [admin, operator]
+        expires_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+paths:
+  # ── Health ──
+  /health:
+    get:
+      summary: Health check
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Serviço ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Métricas em formato Prometheus
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /status:
+    get:
+      summary: Status de componentes (DB, Redis)
+      tags: [Health]
+      responses:
+        "200":
+          description: Todos componentes ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "503":
+          description: Componente degradado
+
+  # ── Auth ──
+  /auth/login:
+    post:
+      summary: Login com credenciais IcingaWeb2
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login bem-sucedido (seta cookie de sessão)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Credenciais inválidas
+
+  /auth/logout:
+    post:
+      summary: Logout (limpa cookie de sessão)
+      tags: [Auth]
+      responses:
+        "200":
+          description: Logout ok
+
+  /auth/me:
+    get:
+      summary: Usuário autenticado atual
+      tags: [Auth]
+      responses:
+        "200":
+          description: Dados do usuário
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+
+  # ── Hosts ──
+  /hosts:
+    get:
+      summary: Listar hosts
+      tags: [Hosts]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 200
+      responses:
+        "200":
+          description: Lista de hosts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hosts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Host"
+                  total:
+                    type: integer
+    post:
+      summary: Criar/atualizar host
+      tags: [Hosts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostCreate"
+      responses:
+        "201":
+          description: Host criado
+
+  /hosts/{name}:
+    get:
+      summary: Obter host por nome
+      tags: [Hosts]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Host encontrado
+        "404":
+          description: Host não encontrado
+    delete:
+      summary: Remover host
+      tags: [Hosts]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Host removido
+
+  /hosts/scan:
+    post:
+      summary: Solicitar scan de rede
+      tags: [Hosts]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subnet:
+                  type: string
+      responses:
+        "202":
+          description: Scan enfileirado
+
+  /hosts/icinga/list:
+    get:
+      summary: Listar hosts diretamente do Icinga2
+      tags: [Hosts]
+      responses:
+        "200":
+          description: Hosts do Icinga2
+
+  # ── Services ──
+  /services:
+    get:
+      summary: Listar serviços monitorados
+      tags: [Services]
+      responses:
+        "200":
+          description: Lista de serviços
+
+  # ── Incidents ──
+  /incidents:
+    get:
+      summary: Listar incidentes (últimos 50)
+      tags: [Incidents]
+      responses:
+        "200":
+          description: Lista de incidentes
+
+  /incidents/{id}:
+    get:
+      summary: Detalhes do incidente com timeline
+      tags: [Incidents]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Incidente com timeline
+        "404":
+          description: Não encontrado
+
+  # ── Events ──
+  /events:
+    post:
+      summary: Receber evento genérico (enfileira para worker)
+      tags: [Events]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventInput"
+      responses:
+        "202":
+          description: Evento aceito
+
+  /icinga/events:
+    post:
+      summary: Receber evento do Icinga (enfileira para worker)
+      tags: [Events]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventInput"
+      responses:
+        "202":
+          description: Evento aceito
+
+  # ── AI ──
+  /ai/explain:
+    post:
+      summary: Solicitar análise de IA para um incidente
+      tags: [AI]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident]
+              properties:
+                incident:
+                  type: object
+                context:
+                  type: object
+      responses:
+        "200":
+          description: Análise da IA
+        "503":
+          description: IA desabilitada
+
+  /ai/models:
+    get:
+      summary: Listar modelos disponíveis do provider
+      tags: [AI]
+      parameters:
+        - name: provider
+          in: query
+          schema:
+            type: string
+            default: openai
+      responses:
+        "200":
+          description: Lista de modelos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIModels"
+
+  /ai/settings:
+    get:
+      summary: Ler configuração atual da IA
+      tags: [AI]
+      responses:
+        "200":
+          description: Configuração atual
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AISettings"
+    post:
+      summary: Atualizar provider/modelo/api_key da IA
+      tags: [AI]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider:
+                  type: string
+                  enum: [openai, deepseek, anthropic, mock]
+                model:
+                  type: string
+                api_key:
+                  type: string
+      responses:
+        "200":
+          description: Configuração atualizada
+
+  /ai/activity:
+    get:
+      summary: Snapshot de atividade da IA (incidentes, remediações, feedback)
+      tags: [AI]
+      responses:
+        "200":
+          description: Atividade da IA
+
+  /ai/feedback:
+    post:
+      summary: Enviar feedback (👍/👎) para uma análise
+      tags: [AI]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident_id, rating]
+              properties:
+                incident_id:
+                  type: string
+                  format: uuid
+                rating:
+                  type: integer
+                  enum: [1, -1]
+                comment:
+                  type: string
+      responses:
+        "201":
+          description: Feedback registrado
+
+  /ai/catalog:
+    get:
+      summary: Listar catálogo de ações de remediação
+      tags: [AI]
+      responses:
+        "200":
+          description: Catálogo
+
+  # ── Remediation ──
+  /remediation/request:
+    post:
+      summary: Solicitar remediação manual
+      tags: [Remediation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident_id, action]
+              properties:
+                incident_id:
+                  type: string
+                  format: uuid
+                action:
+                  type: string
+                params:
+                  type: object
+                reason:
+                  type: string
+      responses:
+        "202":
+          description: Remediação solicitada
+
+  /remediation/pending:
+    get:
+      summary: Listar remediações pendentes de aprovação
+      tags: [Remediation]
+      responses:
+        "200":
+          description: Lista de remediações pendentes
+
+  /remediation/{id}/approve:
+    post:
+      summary: Aprovar remediação pendente
+      tags: [Remediation]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Remediação aprovada e enfileirada
+
+  /remediation/{id}/reject:
+    post:
+      summary: Rejeitar remediação pendente
+      tags: [Remediation]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Remediação rejeitada
+
+  # ── Contacts ──
+  /contacts:
+    get:
+      summary: Listar contatos operacionais
+      tags: [Contacts]
+      responses:
+        "200":
+          description: Lista de contatos
+    post:
+      summary: Criar contato operacional
+      tags: [Contacts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactCreate"
+      responses:
+        "201":
+          description: Contato criado
+
+  /contacts/{name}:
+    patch:
+      summary: Atualizar contato (senha, status, admin)
+      tags: [Contacts]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Contato atualizado
+
+  # ── Comparison ──
+  /comparison/tactical-ai:
+    get:
+      summary: Comparação entre estado tático (Icinga) e atividade IA
+      tags: [AI]
+      responses:
+        "200":
+          description: Comparação Tactical x IA
+
+  # ── Discovery (proxy) ──
+  /discovery/runs:
+    get:
+      summary: Listar execuções de descoberta
+      tags: [Discovery]
+
+  /discovery/assets:
+    get:
+      summary: Listar ativos descobertos
+      tags: [Discovery]
+
+  /discovery/topology:
+    get:
+      summary: Listar edges de topologia
+      tags: [Discovery]
+
+  /discovery/scan:
+    post:
+      summary: Iniciar scan de descoberta
+      tags: [Discovery]
+      responses:
+        "202":
+          description: Scan iniciado
+
+  /discovery/policies:
+    get:
+      summary: Listar políticas de descoberta
+      tags: [Discovery]
+    post:
+      summary: Criar política de descoberta
+      tags: [Discovery]
+
+  /discovery/targets:
+    get:
+      summary: Listar alvos de descoberta
+      tags: [Discovery]
+    post:
+      summary: Adicionar alvo de descoberta
+      tags: [Discovery]
+
+  # ── Service Discovery ──
+  /sd/targets:
+    get:
+      summary: Prometheus HTTP Service Discovery
+      tags: [Monitoring]
+      security: []
+      responses:
+        "200":
+          description: Targets no formato Prometheus SD

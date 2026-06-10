@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://r-observe-prometheus:9090/prometheus
+    isDefault: true
+    uid: r-observe-prometheus
+    jsonData:
+      timeInterval: "15s"
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://r-observe-loki:3100
+    uid: r-observe-loki
+    jsonData:
+      maxLines: 1000

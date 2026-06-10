@@ -1,0 +1,43 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  filename: /positions/positions.yaml
+  sync_period: 10s
+
+clients:
+  - url: http://r-observe-loki:3100/loki/api/v1/push
+    external_labels:
+      source: docker
+    batchwait: 1s
+    batchsize: 102400
+
+scrape_configs:
+  - job_name: containers
+    pipeline_stages:
+      - docker: {}
+      - json:
+          expressions:
+            service: service
+      - labels:
+          service:
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: [__meta_docker_container_status]
+        regex: running
+        action: keep
+      - target_label: job
+        replacement: containers
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label: compose_project
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: [__meta_docker_image_name]
+        target_label: image

@@ -1,0 +1,234 @@
+# R-Observe Discovery — Knowledge Base
+# Arquivo: port-hints.yml
+# Mapeamento porta → tecnologia/categoria/produto
+# Hot-reload: alterações neste arquivo entram em vigor sem restart
+
+ports:
+  21:
+    technology: ftp
+    category: infrastructure
+    product: FTP Service
+  22:
+    technology: ssh
+    category: infrastructure
+    product: SSH Host
+  23:
+    technology: telnet
+    category: infrastructure
+    product: Telnet Service
+  25:
+    technology: smtp
+    category: mail
+    product: SMTP Service
+  53:
+    technology: dns
+    category: dns
+    product: DNS Service
+  80:
+    technology: http
+    category: web
+    product: HTTP Service
+  110:
+    technology: pop3
+    category: mail
+    product: POP3 Service
+  123:
+    technology: ntp
+    category: infrastructure
+    product: NTP Service
+  143:
+    technology: imap
+    category: mail
+    product: IMAP Service
+  161:
+    technology: snmp
+    category: infrastructure
+    product: SNMP Agent
+  389:
+    technology: ldap
+    category: directory
+    product: LDAP Service
+  443:
+    technology: http
+    category: web
+    product: HTTPS Service
+  445:
+    technology: smb
+    category: infrastructure
+    product: SMB Service
+  465:
+    technology: smtp
+    category: mail
+    product: SMTPS Service
+  554:
+    technology: rtsp
+    category: iot
+    product: RTSP Service
+  587:
+    technology: smtp
+    category: mail
+    product: SMTP Submission
+  993:
+    technology: imap
+    category: mail
+    product: IMAPS Service
+  995:
+    technology: pop3
+    category: mail
+    product: POP3S Service
+  1723:
+    technology: pptp
+    category: vpn
+    product: PPTP VPN
+  1883:
+    technology: mqtt
+    category: iot
+    product: MQTT Broker
+  3000:
+    technology: grafana
+    category: observability
+    product: Grafana / Web App
+  3306:
+    technology: mysql
+    category: database
+    product: MariaDB / MySQL
+  3389:
+    technology: rdp
+    category: remote-access
+    product: RDP Service
+  3702:
+    technology: onvif
+    category: iot
+    product: ONVIF WS-Discovery
+  4000:
+    technology: http
+    category: web
+    product: Web Application
+  5000:
+    technology: docker-registry
+    category: registry
+    product: Docker Registry / Web App
+  5060:
+    technology: sip
+    category: voice
+    product: SIP Endpoint
+  5432:
+    technology: postgres
+    category: database
+    product: PostgreSQL
+  5672:
+    technology: amqp
+    category: messaging
+    product: RabbitMQ / AMQP
+  6379:
+    technology: redis
+    category: cache
+    product: Redis
+  7000:
+    technology: java
+    category: application
+    product: Application Server (alt-HTTP)
+  7001:
+    technology: java
+    category: application
+    product: Application Server
+  7002:
+    technology: java
+    category: application
+    product: Application Server
+  8000:
+    technology: http
+    category: web
+    product: Web Application (alt)
+  8008:
+    technology: java
+    category: application
+    product: Apache Tomcat HTTP
+  8009:
+    technology: java
+    category: application
+    product: Apache Tomcat AJP Connector
+  8080:
+    technology: http
+    category: web
+    product: HTTP Proxy / Web App
+  8081:
+    technology: http
+    category: web
+    product: HTTP Alt
+  8088:
+    technology: java
+    category: application
+    product: Application Port
+  8443:
+    technology: java
+    category: application
+    product: Apache Tomcat HTTPS
+  8888:
+    technology: http
+    category: web
+    product: Web Application
+  9000:
+    technology: java
+    category: application
+    product: Application Listener
+  9001:
+    technology: tor
+    category: anonymizer
+    product: Tor ORPort
+  9043:
+    technology: java
+    category: application
+    product: Application SSL
+  9090:
+    technology: prometheus
+    category: observability
+    product: Prometheus
+  9092:
+    technology: kafka
+    category: messaging
+    product: Kafka Broker
+  9093:
+    technology: kafka
+    category: messaging
+    product: Kafka Controller
+  9100:
+    technology: node-exporter
+    category: observability
+    product: Node Exporter
+  9121:
+    technology: nginx-exporter
+    category: observability
+    product: Nginx Exporter
+  9187:
+    technology: postgres-exporter
+    category: observability
+    product: Postgres Exporter
+  9200:
+    technology: elasticsearch
+    category: search
+    product: Elasticsearch
+  9300:
+    technology: elasticsearch
+    category: search
+    product: Elasticsearch Transport
+  9443:
+    technology: java
+    category: application
+    product: Application Server HTTPS
+  9999:
+    technology: java
+    category: application
+    product: Application Server (mgmt)
+  11211:
+    technology: memcached
+    category: cache
+    product: Memcached
+  27017:
+    technology: mongodb
+    category: database
+    product: MongoDB
+  28015:
+    technology: rethinkdb
+    category: database
+    product: RethinkDB

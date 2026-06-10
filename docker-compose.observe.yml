@@ -1,0 +1,831 @@
+# ─── R-Observe AI Ops Stack ───────────────────────────────────────────────────
+# Produto: RAP Observe / R-Observe AI Ops
+#
+# Uso:
+#   docker compose -f docker-compose.observe.yml --env-file .env.observe up -d
+#
+# Profiles disponíveis:
+#   observe-core        → API, Worker, Discovery, PostgreSQL, Redis (obrigatório)
+#   observe-ai          → Serviço de IA
+#   observe-agent       → Agente local (acesso docker.sock:ro)
+#   observe-discovery   → Discovery engine (já incluso em observe-core)
+#   observe-icinga      → Icinga2, IcingaDB, IcingaWeb2, Icinga-Redis
+#   observe-monitoring  → Prometheus, Loki, Grafana, OTel Collector
+#   r-observe-proxy       → Nginx reverse proxy
+#
+# Exemplo completo:
+#   docker compose -f docker-compose.observe.yml \
+#     --env-file .env.observe \
+#     --profile observe-core \
+#     --profile observe-ai \
+#     --profile observe-monitoring \
+#     --profile observe-icinga \
+#     --profile r-observe-proxy \
+#     up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${OBSERVE_LOG_MAX_SIZE:-50m}"
+    max-file: "${OBSERVE_LOG_MAX_FILE:-5}"
+
+x-common: &common
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging: *default-logging
+
+services:
+
+  # ─── POSTGRESQL ─────────────────────────────────────────────────────────────
+  r-observe-postgres:
+    <<: *common
+    image: postgres:16-alpine
+    container_name: r-observe-postgres
+    profiles: [observe-core]
+    environment:
+      POSTGRES_DB: ${OBSERVE_DB_NAME:-observedb}
+      POSTGRES_USER: ${OBSERVE_DB_USER:-observe}
+      POSTGRES_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório - defina em .env.observe}
+      ICINGADB_DB_NAME: ${ICINGADB_DB_NAME:-icingadb}
+      ICINGADB_DB_USER: ${ICINGADB_DB_USER:-icingadb}
+      ICINGADB_DB_PASSWORD: ${ICINGADB_DB_PASSWORD:?ICINGADB_DB_PASSWORD obrigatório - defina em .env.observe}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - r-observe-postgres-data:/var/lib/postgresql/data
+      - ./observe/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${OBSERVE_DB_PORT:-5432}:5432"
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OBSERVE_DB_USER:-observe} -d ${OBSERVE_DB_NAME:-observedb}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─── REDIS (R-Observe) ───────────────────────────────────────────────────────
+  r-observe-redis:
+    <<: *common
+    image: redis:7-alpine
+    container_name: r-observe-redis
+    profiles: [observe-core]
+    command:
+      - redis-server
+      - "--save"
+      - "60"
+      - "100"
+      - "--appendonly"
+      - "yes"
+      - "--requirepass"
+      - "${OBSERVE_REDIS_PASSWORD:-}"
+    volumes:
+      - r-observe-redis-data:/data
+    ports:
+      - "127.0.0.1:${OBSERVE_REDIS_PORT:-6379}:6379"
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"${OBSERVE_REDIS_PASSWORD:-}\" ping | grep -q PONG || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─── R-OBSERVE API ───────────────────────────────────────────────────────────
+  r-observe-api:
+    <<: *common
+    build:
+      context: ./r-observe
+      dockerfile: api/Dockerfile
+    container_name: r-observe-api
+    profiles: [observe-core]
+    depends_on:
+      r-observe-postgres:
+        condition: service_healthy
+      r-observe-redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      BASE_PATH: ${R_OBSERVE_API_BASE_PATH:-/observe/api}
+      DB_HOST: r-observe-postgres
+      DB_PORT: 5432
+      DB_NAME: ${OBSERVE_DB_NAME:-observedb}
+      DB_USER: ${OBSERVE_DB_USER:-observe}
+      DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
+      TENANT_MODE: ${R_OBSERVE_TENANT_MODE:-multi}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      WEBHOOK_SECRET: ${OBSERVE_WEBHOOK_SECRET:-}
+      AI_SERVICE_URL: http://r-observe-ai:3000
+      DISCOVERY_SERVICE_URL: http://r-observe-discovery:3010
+      DISCOVERY_TIMEOUT_MS: ${DISCOVERY_TIMEOUT_MS:-30000}
+      AI_ENABLED: ${R_OBSERVE_AI_ENABLED:-true}
+      AI_TIMEOUT_MS: ${R_OBSERVE_AI_TIMEOUT_MS:-30000}
+      AI_SETTINGS_RECONCILE_STRICT: ${AI_SETTINGS_RECONCILE_STRICT:-false}
+      LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
+      ICINGA_API_URL: ${ICINGA_API_URL:-https://r-observe-icinga2:5665}
+      ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
+      ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:-}
+      ICINGAWEB_ADMIN_USER: ${ICINGAWEB_ADMIN_USER:-admin}
+      ICINGAWEB_ADMIN_PASS: ${ICINGAWEB_ADMIN_PASS:-}
+      OBSERVE_INITIAL_USERS_JSON: ${OBSERVE_INITIAL_USERS_JSON:-}
+      CORS_ORIGINS: ${OBSERVE_CORS_ORIGINS:-}
+      TZ: ${TZ:-America/Sao_Paulo}
+      # ── OpenTelemetry ──────────────────────────────────────────────────────
+      OTEL_SERVICE_NAME: r-observe-api
+      OTEL_SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
+    volumes:
+      - observe-evidence:/app/data/evidence
+      - observe-replays:/app/data/replays
+      - observe-logs:/app/logs
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-monitoring
+      - observe-public
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/observe/api/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # ─── R-OBSERVE WORKER ────────────────────────────────────────────────────────
+  r-observe-worker:
+    <<: *common
+    build:
+      context: ./r-observe
+      dockerfile: worker/Dockerfile
+    container_name: r-observe-worker
+    profiles: [observe-core]
+    depends_on:
+      r-observe-postgres:
+        condition: service_healthy
+      r-observe-redis:
+        condition: service_healthy
+      r-observe-api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      DB_HOST: r-observe-postgres
+      DB_PORT: 5432
+      DB_NAME: ${OBSERVE_DB_NAME:-observedb}
+      DB_USER: ${OBSERVE_DB_USER:-observe}
+      DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      API_URL: http://r-observe-api:3000
+      AI_SERVICE_URL: http://r-observe-ai:3000
+      AI_ENABLED: ${R_OBSERVE_AI_ENABLED:-true}
+      LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
+      TZ: ${TZ:-America/Sao_Paulo}
+      ICINGA_API_URL: ${ICINGA_API_URL:-https://r-observe-icinga2:5665}
+      ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
+      ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:-}
+      # ── Remediação com supervisão por score ───────────────────────────────────
+      REMEDIATION_ENABLED: ${REMEDIATION_ENABLED:-true}
+      # Score mínimo para execução automática (0.0–1.0). Padrão conservador: 0.85
+      REMEDIATION_AUTO_THRESHOLD: ${REMEDIATION_AUTO_THRESHOLD:-0.85}
+      # Severidade máxima permitida para auto-execução (warning = não executa critical)
+      REMEDIATION_MAX_AUTO_SEVERITY: ${REMEDIATION_MAX_AUTO_SEVERITY:-warning}
+      # Containers Docker permitidos para restart/start automático (vírgula-separados)
+      # Deixar vazio desabilita operações Docker. Ex: r-observe-worker,r-observe-api
+      REMEDIATION_ALLOWED_CONTAINERS: ${REMEDIATION_ALLOWED_CONTAINERS:-}
+      # ── OpenTelemetry ──────────────────────────────────────────────────────
+      OTEL_SERVICE_NAME: r-observe-worker
+      OTEL_SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
+    volumes:
+      - observe-evidence:/app/data/evidence
+      - observe-replays:/app/data/replays
+      - observe-logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # ─── R-OBSERVE AI ────────────────────────────────────────────────────────────
+  r-observe-ai:
+    <<: *common
+    build:
+      context: ./r-observe
+      dockerfile: ai/Dockerfile
+    container_name: r-observe-ai
+    profiles: [observe-ai]
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      AI_PROVIDER: ${R_OBSERVE_AI_PROVIDER:-openai}
+      AI_MODEL: ${R_OBSERVE_AI_MODEL:-gpt-4o-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      AI_TIMEOUT_MS: ${R_OBSERVE_AI_TIMEOUT_MS:-30000}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
+      TZ: ${TZ:-America/Sao_Paulo}
+      # ── OpenTelemetry ──────────────────────────────────────────────────────
+      OTEL_SERVICE_NAME: r-observe-ai
+      OTEL_SERVICE_VERSION: "0.4.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-egress
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+
+  # ─── R-OBSERVE AGENT ─────────────────────────────────────────────────────────
+  r-observe-agent:
+    <<: *common
+    build:
+      context: ./r-observe
+      dockerfile: agent/Dockerfile
+    container_name: r-observe-agent
+    profiles: [observe-agent]
+    depends_on:
+      r-observe-api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      API_URL: ${OBSERVE_AGENT_API_URL:-http://r-observe-api:3000}
+      API_BASE_PATH: ${R_OBSERVE_API_BASE_PATH:-/observe/api}
+      CHECK_INTERVAL_MS: ${OBSERVE_AGENT_CHECK_INTERVAL_MS:-60000}
+      AGENT_ID: ${OBSERVE_AGENT_ID:-local-agent-01}
+      AGENT_HOST_ADDRESS: ${OBSERVE_AGENT_HOST_ADDRESS:-}
+      OBSERVE_DOCKER_PROJECTS: ${OBSERVE_DOCKER_PROJECTS:-infra,infra-httpd,infra-mail,dns-consolidated,edge-sni}
+      OBSERVE_DOCKER_IGNORE_CONTAINERS: ${OBSERVE_DOCKER_IGNORE_CONTAINERS:-results-mail-certs-bootstrap}
+      DISK_WARN_PERCENT: ${OBSERVE_AGENT_DISK_WARN:-80}
+      LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
+      TZ: ${TZ:-America/Sao_Paulo}
+      # ── Checks HTTP externos (label=url, separados por vírgula) ───────────────
+      OBSERVE_HTTP_CHECKS: ${OBSERVE_HTTP_CHECKS:-secure-httpd=https://10.10.2.30,webmail=https://10.10.2.30/webmail,r-observe-proxy=http://r-observe-proxy:80/observe/api/health,grafana=http://r-observe-grafana:3000/api/health,prometheus=http://r-observe-prometheus:9090/prometheus/-/healthy,rspamd=http://10.10.2.30:11334/stat}
+      # ── Checks TCP externos (label=host:port, separados por vírgula) ──────────
+      OBSERVE_TCP_CHECKS: ${OBSERVE_TCP_CHECKS:-postfix-mx1=10.10.2.3:25,postfix-mx2=10.10.2.23:25,dovecot-imaps=10.10.2.3:993,smtp-submission-mx1=10.10.2.3:587,mariadb=10.10.2.99:3306,ns1-dns=10.10.2.1:53,ns2-dns=10.10.2.20:53}
+      # ── Hosts estáticos/externos a registrar no inventário (JSON) ─────────────
+      OBSERVE_STATIC_HOSTS: ${OBSERVE_STATIC_HOSTS:-[]}
+      # ── OpenTelemetry ──────────────────────────────────────────────────────
+      OTEL_SERVICE_NAME: r-observe-agent
+      OTEL_SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-agent
+      - observe-egress
+      - observe-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── R-OBSERVE DISCOVERY ────────────────────────────────────────────────────
+  r-observe-discovery:
+    <<: *common
+    build:
+      context: ./r-observe
+      dockerfile: discovery/Dockerfile
+    container_name: r-observe-discovery
+    profiles: [observe-core, observe-discovery]
+    user: "${OBSERVE_DISCOVERY_UID:-1000}:${OBSERVE_DISCOVERY_GID:-1000}"
+    depends_on:
+      r-observe-postgres:
+        condition: service_healthy
+      r-observe-redis:
+        condition: service_healthy
+      r-observe-api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3010
+      DB_HOST: r-observe-postgres
+      DB_PORT: 5432
+      DB_NAME: ${OBSERVE_DB_NAME:-observedb}
+      DB_USER: ${OBSERVE_DB_USER:-observe}
+      DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
+      DISCOVERY_SD_FILE: /app/data/sd/discovery-engine.json
+      DISCOVERY_DOCKER_ENABLED: ${DISCOVERY_DOCKER_ENABLED:-true}
+      DISCOVERY_SCAN_QUEUE_ENABLED: ${DISCOVERY_SCAN_QUEUE_ENABLED:-true}
+      # ── Enterprise Discovery Scanners ──────────────────────────────────────
+      DISCOVERY_PING_SWEEP_ENABLED: ${DISCOVERY_PING_SWEEP_ENABLED:-false}
+      DISCOVERY_IPV6_ENABLED: ${DISCOVERY_IPV6_ENABLED:-false}
+      DISCOVERY_WINDOWS_ENABLED: ${DISCOVERY_WINDOWS_ENABLED:-false}
+      DISCOVERY_K8S_ENABLED: ${DISCOVERY_K8S_ENABLED:-false}
+      DISCOVERY_CLOUD_ENABLED: ${DISCOVERY_CLOUD_ENABLED:-false}
+      DISCOVERY_LLDP_ENABLED: ${DISCOVERY_LLDP_ENABLED:-false}
+      DISCOVERY_BLUETOOTH_ENABLED: ${DISCOVERY_BLUETOOTH_ENABLED:-false}
+      DISCOVERY_INDUSTRIAL_ENABLED: ${DISCOVERY_INDUSTRIAL_ENABLED:-false}
+      DISCOVERY_DHCP_PORT: ${DISCOVERY_DHCP_PORT:-67}
+      # ── Host network context (para container sem network_mode:host) ─────────
+      DISCOVERY_HOST_GATEWAY: ${DISCOVERY_HOST_GATEWAY:-}
+      DISCOVERY_HOST_LOCAL_IPS: ${DISCOVERY_HOST_LOCAL_IPS:-}
+      # ── Scan tuning ────────────────────────────────────────────────────────
+      DISCOVERY_EXTRA_PORTS: ${DISCOVERY_EXTRA_PORTS:-}
+      DISCOVERY_SCAN_PARALLEL: ${DISCOVERY_SCAN_PARALLEL:-20}
+      DISCOVERY_KNOWLEDGE_DIR: ${DISCOVERY_KNOWLEDGE_DIR:-/app/knowledge}
+      DISCOVERY_KNOWLEDGE_HOT_RELOAD: ${DISCOVERY_KNOWLEDGE_HOT_RELOAD:-true}
+      # ── ARP auto-scan ──────────────────────────────────────────────────────
+      DISCOVERY_ARP_ENABLED: ${DISCOVERY_ARP_ENABLED:-true}
+      DISCOVERY_ARP_AUTOSCAN_ENABLED: ${DISCOVERY_ARP_AUTOSCAN_ENABLED:-true}
+      DISCOVERY_ARP_AUTOSCAN_MAX: ${DISCOVERY_ARP_AUTOSCAN_MAX:-50}
+      ICINGA_API_URL: ${ICINGA_API_URL:-https://r-observe-icinga2:5665}
+      ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
+      ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:-}
+      ICINGA_API_ADMIN_USER: ${ICINGA_API_ADMIN_USER:-root}
+      ICINGA_API_ADMIN_PASSWORD: ${ICINGA_API_ADMIN_PASSWORD:-${ICINGA_ROOT_PASSWORD:-}}
+      ICINGA_ROOT_PASSWORD: ${ICINGA_ROOT_PASSWORD:-}
+      TZ: ${TZ:-America/Sao_Paulo}
+      OTEL_SERVICE_NAME: r-observe-discovery
+      OTEL_SERVICE_VERSION: "0.1.0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
+    volumes:
+      - ./observe/prometheus/sd:/app/data/sd
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/net/arp:/host-arp:ro
+    group_add:
+      - "${DOCKER_SOCKET_GID:-137}"
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-monitoring
+      - observe-egress
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3010/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── REDIS dedicado Icinga (IcingaDB) ────────────────────────────────────────
+  r-observe-icinga-redis:
+    <<: *common
+    image: redis:7-alpine
+    container_name: r-observe-icinga-redis
+    profiles: [observe-icinga]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs:
+      - /data
+      - /tmp
+    networks:
+      - observe-monitoring
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─── ICINGA 2 ────────────────────────────────────────────────────────────────
+  r-observe-icinga2:
+    <<: *common
+    build:
+      context: ./observe/icinga2
+    container_name: r-observe-icinga2
+    profiles: [observe-icinga]
+    depends_on:
+      r-observe-icinga-redis:
+        condition: service_healthy
+    environment:
+      ICINGA_MASTER: 1
+      ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
+      ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:?ICINGA_API_PASSWORD obrigatório}
+      ICINGA_ROOT_PASSWORD: ${ICINGA_ROOT_PASSWORD:-}
+      ICINGA_REDIS_HOST: r-observe-icinga-redis
+      ICINGA_REDIS_PORT: 6379
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - r-observe-icinga2-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+      - observe-internal
+      - observe-egress
+      - mail-net
+      - dns-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -skf -u \"${ICINGA_API_USER:-icingaweb2}:${ICINGA_API_PASSWORD}\" https://127.0.0.1:5665/v1/status/IcingaApplication >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 90s
+
+  # ─── ICINGA DB ───────────────────────────────────────────────────────────────
+  r-observe-icingadb:
+    <<: *common
+    image: icinga/icingadb:1.5.1
+    container_name: r-observe-icingadb
+    profiles: [observe-icinga]
+    depends_on:
+      r-observe-postgres:
+        condition: service_healthy
+      r-observe-icinga-redis:
+        condition: service_healthy
+    environment:
+      ICINGADB_DATABASE_TYPE: pgsql
+      ICINGADB_DATABASE_HOST: r-observe-postgres
+      ICINGADB_DATABASE_PORT: 5432
+      ICINGADB_DATABASE_DATABASE: ${ICINGADB_DB_NAME:-icingadb}
+      ICINGADB_DATABASE_USER: ${ICINGADB_DB_USER:-icingadb}
+      ICINGADB_DATABASE_PASSWORD: ${ICINGADB_DB_PASSWORD:?ICINGADB_DB_PASSWORD obrigatório}
+      ICINGADB_REDIS_HOST: r-observe-icinga-redis
+      ICINGADB_REDIS_PORT: 6379
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - r-observe-icingadb-data:/var/lib/icingadb
+      - ./observe/icingadb/config.yml:/etc/icingadb/config.yml:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+      - observe-internal
+    healthcheck:
+      disable: true
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ─── ICINGA WEB 2 ────────────────────────────────────────────────────────────
+  r-observe-icingaweb2:
+    <<: *common
+    image: icinga/icingaweb2:2.12
+    container_name: r-observe-icingaweb2
+    profiles: [observe-icinga]
+    depends_on:
+      r-observe-icinga2:
+        condition: service_healthy
+      r-observe-icingadb:
+        condition: service_started
+      r-observe-postgres:
+        condition: service_healthy
+    environment:
+      # ── IcingaWeb2 base ─────────────────────────────────────────────────────
+      icingaweb.enabledModules: icingadb
+      ICINGAWEB_ADMIN_USER: ${ICINGAWEB_ADMIN_USER:-admin}
+      ICINGAWEB_ADMIN_PASS: ${ICINGAWEB_ADMIN_PASS:?ICINGAWEB_ADMIN_PASS obrigatório - defina em .env.observe}
+      TZ: ${TZ:-America/Sao_Paulo}
+
+      # ── Config global: base URL (evita redirects quebrados via proxy) ────────
+      icingaweb.config.global.base_url: /icinga/
+      icingaweb.config.global.config_resource: icingaweb2
+
+      # ── Resource: banco de usuários do IcingaWeb2 (observedb) ───────────────
+      icingaweb.resources.icingaweb2.type: db
+      icingaweb.resources.icingaweb2.db: pgsql
+      icingaweb.resources.icingaweb2.host: r-observe-postgres
+      icingaweb.resources.icingaweb2.port: "5432"
+      icingaweb.resources.icingaweb2.dbname: ${OBSERVE_DB_NAME:-observedb}
+      icingaweb.resources.icingaweb2.username: ${OBSERVE_DB_USER:-observe}
+      icingaweb.resources.icingaweb2.password: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+
+      # ── Autenticação: backend db usando resource icingaweb2 ──────────────────
+      icingaweb.authentication.icingaweb2.backend: db
+      icingaweb.authentication.icingaweb2.resource: icingaweb2
+
+      # ── Roles ────────────────────────────────────────────────────────────────
+      icingaweb.roles.Administrators.users: ${ICINGAWEB_ADMIN_USER:-admin}
+      icingaweb.roles.Administrators.permissions: "*"
+
+      # ── Resource PostgreSQL (icingadb) ──────────────────────────────────────
+      icingaweb.resources.icingadb.type: db
+      icingaweb.resources.icingadb.db: pgsql
+      icingaweb.resources.icingadb.host: r-observe-postgres
+      icingaweb.resources.icingadb.port: "5432"
+      icingaweb.resources.icingadb.dbname: ${ICINGADB_DB_NAME:-icingadb}
+      icingaweb.resources.icingadb.username: ${ICINGADB_DB_USER:-icingadb}
+      icingaweb.resources.icingadb.password: ${ICINGADB_DB_PASSWORD:?ICINGADB_DB_PASSWORD obrigatório}
+
+      # ── Módulo IcingaDB: Redis ───────────────────────────────────────────────
+      icingaweb.modules.icingadb.config.redis1.host: r-observe-icinga-redis
+      icingaweb.modules.icingadb.config.redis1.port: "6379"
+      icingaweb.modules.icingadb.redis.redis1.host: r-observe-icinga-redis
+      icingaweb.modules.icingadb.redis.redis1.port: "6379"
+
+      # ── Módulo IcingaDB: resource do banco (lido de config.ini [icingadb]) ───
+      icingaweb.modules.icingadb.config.icingadb.resource: icingadb
+    volumes:
+      - r-observe-icingaweb2-data:/data
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+      - observe-internal
+      - observe-public
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '>/dev/tcp/127.0.0.1/8080' 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  # ─── PROMETHEUS ──────────────────────────────────────────────────────────────
+  r-observe-prometheus:
+    <<: *common
+    image: prom/prometheus:v2.52.0
+    container_name: r-observe-prometheus
+    profiles: [observe-monitoring]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+      - "--web.external-url=/prometheus/"
+      - "--web.route-prefix=/prometheus/"
+    volumes:
+      - r-observe-prometheus-data:/prometheus
+      - ./observe/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observe/prometheus/rules:/etc/prometheus/rules:ro
+      - ./observe/prometheus/sd:/etc/prometheus/sd:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+      - observe-internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O /dev/null http://127.0.0.1:9090/prometheus/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── LOKI ────────────────────────────────────────────────────────────────────
+  r-observe-loki:
+    <<: *common
+    image: grafana/loki:2.9.8
+    container_name: r-observe-loki
+    profiles: [observe-monitoring]
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - r-observe-loki-data:/loki
+      - ./observe/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready | grep -q 'ready' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── PROMTAIL (coleta logs Docker → Loki) ────────────────────────────────────
+  r-observe-promtail:
+    <<: *common
+    image: grafana/promtail:2.9.8
+    container_name: r-observe-promtail
+    profiles: [observe-monitoring]
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    volumes:
+      - ./observe/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/log:/var/log:ro
+      - r-observe-promtail-positions:/positions
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+    depends_on:
+      r-observe-loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── GRAFANA ─────────────────────────────────────────────────────────────────
+  r-observe-grafana:
+    <<: *common
+    image: grafana/grafana:10.4.3
+    container_name: r-observe-grafana
+    profiles: [observe-monitoring]
+    depends_on:
+      r-observe-prometheus:
+        condition: service_healthy
+      r-observe-loki:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD obrigatório}
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-https://r-observe.results.com.br/grafana/}
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-warn}
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - r-observe-grafana-data:/var/lib/grafana
+      - ./observe/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observe/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+      - observe-public
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q '\"database\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # ─── OPENTELEMETRY COLLECTOR ─────────────────────────────────────────────────
+  r-observe-otel-collector:
+    <<: *common
+    image: otel/opentelemetry-collector-contrib:0.101.0
+    container_name: r-observe-otel-collector
+    profiles: [observe-monitoring]
+    command: ["--config=/etc/otel-collector-config.yml"]
+    volumes:
+      - ./observe/otel/otel-collector-config.yml:/etc/otel-collector-config.yml:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-monitoring
+      - observe-internal
+    healthcheck:
+      disable: true
+
+  # ─── NGINX REVERSE PROXY ─────────────────────────────────────────────────────
+  r-observe-proxy:
+    <<: *common
+    image: nginx:1.25-alpine
+    container_name: r-observe-proxy
+    profiles: [r-observe-proxy]
+    depends_on:
+      r-observe-api:
+        condition: service_healthy
+    ports:
+      - "${OBSERVE_PROXY_BIND_IP:-0.0.0.0}:${OBSERVE_HTTP_PORT:-3080}:80"
+    volumes:
+      - ./observe/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./observe/nginx/conf.d:/etc/nginx/conf.d:ro
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    networks:
+      - observe-public
+      - observe-internal
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t 2>/dev/null && wget -qO- http://127.0.0.1/observe/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ─── POSTGRES EXPORTER ────────────────────────────────────────────────────────
+  r-observe-postgres-exporter:
+    <<: *common
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: r-observe-postgres-exporter
+    profiles: [observe-monitoring]
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${OBSERVE_DB_USER}:${OBSERVE_DB_PASSWORD}@r-observe-postgres:5432/${OBSERVE_DB_NAME:-observedb}?sslmode=disable"
+    depends_on:
+      r-observe-postgres:
+        condition: service_healthy
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-monitoring
+
+  # ─── REDIS EXPORTER ──────────────────────────────────────────────────────────
+  r-observe-redis-exporter:
+    <<: *common
+    image: oliver006/redis_exporter:latest
+    container_name: r-observe-redis-exporter
+    profiles: [observe-monitoring]
+    environment:
+      REDIS_ADDR: "redis://r-observe-redis:6379"
+    depends_on:
+      r-observe-redis:
+        condition: service_healthy
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-monitoring
+
+  # ─── SNMP EXPORTER (camada física L1) ────────────────────────────────────────
+  r-observe-snmp-exporter:
+    <<: *common
+    image: prom/snmp-exporter:v0.26.0
+    container_name: r-observe-snmp-exporter
+    profiles: [observe-monitoring, observe-discovery]
+    volumes:
+      - ./observe/prometheus/snmp.yml:/etc/snmp_exporter/snmp.yml:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - observe-internal
+      - observe-monitoring
+
+# ─── VOLUMES ─────────────────────────────────────────────────────────────────
+volumes:
+  r-observe-postgres-data:
+  r-observe-redis-data:
+  r-observe-icinga2-data:
+  r-observe-icingaweb2-data:
+  r-observe-icingadb-data:
+  r-observe-prometheus-data:
+  r-observe-loki-data:
+  r-observe-grafana-data:
+  observe-evidence:
+  observe-replays:
+  observe-logs:
+  observe-config:
+  r-observe-promtail-positions:
+
+# ─── NETWORKS ────────────────────────────────────────────────────────────────
+networks:
+  # Rede pública: proxy, grafana, icingaweb2 (serviços com porta exposta)
+  observe-public:
+    driver: bridge
+
+  # Rede interna: API, worker, AI, banco, Redis (sem exposição externa)
+  observe-internal:
+    driver: bridge
+    internal: true
+
+  # Rede de monitoramento: Prometheus, Loki, Grafana, OTel, Icinga
+  observe-monitoring:
+    driver: bridge
+    internal: true
+
+  # Rede do agente: agent + exporters futuros
+  observe-agent:
+    driver: bridge
+
+  # Rede de egresso: bridge com acesso externo para o serviço de IA chamar APIs remotas
+  observe-egress:
+    driver: bridge
+
+  # Redes externas para monitoramento cross-stack
+  mail-net:
+    name: infra-mail_default
+    external: true
+  dns-net:
+    name: dns-consolidated_dns-internal
+    external: true

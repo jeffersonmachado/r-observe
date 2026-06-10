@@ -1,0 +1,720 @@
+{
+  "version": 3,
+  "port_hints": {
+    "22": {
+      "technology": "ssh",
+      "category": "infrastructure",
+      "product": "SSH Host"
+    },
+    "25": {
+      "technology": "smtp",
+      "category": "mail",
+      "product": "SMTP Service"
+    },
+    "53": {
+      "technology": "dns",
+      "category": "dns",
+      "product": "DNS Service"
+    },
+    "80": {
+      "technology": "http",
+      "category": "web",
+      "product": "HTTP Service"
+    },
+    "443": {
+      "technology": "http",
+      "category": "web",
+      "product": "HTTPS Service"
+    },
+    "554": {
+      "technology": "rtsp",
+      "category": "iot",
+      "product": "RTSP Service"
+    },
+    "587": {
+      "technology": "smtp",
+      "category": "mail",
+      "product": "SMTP Submission"
+    },
+    "993": {
+      "technology": "imap",
+      "category": "mail",
+      "product": "IMAPS Service"
+    },
+    "3000": {
+      "technology": "grafana",
+      "category": "observability",
+      "product": "Grafana"
+    },
+    "3306": {
+      "technology": "mysql",
+      "category": "database",
+      "product": "MariaDB"
+    },
+    "5000": {
+      "technology": "docker-registry",
+      "category": "registry",
+      "product": "Docker Registry"
+    },
+    "5060": {
+      "technology": "sip",
+      "category": "voice",
+      "product": "SIP Endpoint"
+    },
+    "5432": {
+      "technology": "postgres",
+      "category": "database",
+      "product": "PostgreSQL"
+    },
+    "6379": {
+      "technology": "redis",
+      "category": "cache",
+      "product": "Redis"
+    },
+    "7000": {
+      "technology": "java",
+      "category": "application",
+      "product": "Application Server (alt-HTTP)"
+    },
+    "8008": {
+      "technology": "java",
+      "category": "application",
+      "product": "Apache Tomcat HTTP"
+    },
+    "8009": {
+      "technology": "java",
+      "category": "application",
+      "product": "Apache Tomcat AJP Connector"
+    },
+    "8088": {
+      "technology": "java",
+      "category": "application",
+      "product": "Application Port (filtered)"
+    },
+    "8443": {
+      "technology": "java",
+      "category": "application",
+      "product": "Apache Tomcat HTTPS"
+    },
+    "9000": {
+      "technology": "java",
+      "category": "application",
+      "product": "Application Listener Port"
+    },
+    "9001": {
+      "technology": "tor",
+      "category": "anonymizer",
+      "product": "Tor ORPort (filtered)"
+    },
+    "9090": {
+      "technology": "prometheus",
+      "category": "observability",
+      "product": "Prometheus"
+    },
+    "9100": {
+      "technology": "node-exporter",
+      "category": "observability",
+      "product": "Node Exporter"
+    },
+    "9121": {
+      "technology": "nginx-exporter",
+      "category": "observability",
+      "product": "Nginx Exporter"
+    },
+    "9187": {
+      "technology": "postgres-exporter",
+      "category": "observability",
+      "product": "Postgres Exporter"
+    }
+  },
+  "text_patterns": [
+    {
+      "pattern": "\\bapache\\b",
+      "flags": "i",
+      "product": "Apache",
+      "technology": "apache",
+      "vendor": "Open Source",
+      "category": "web"
+    },
+    {
+      "pattern": "\\bnginx\\b",
+      "flags": "i",
+      "product": "Nginx",
+      "technology": "nginx",
+      "vendor": "Open Source",
+      "category": "web"
+    },
+    {
+      "pattern": "\\bpostgres(?:ql)?\\b",
+      "flags": "i",
+      "product": "PostgreSQL",
+      "technology": "postgres",
+      "vendor": "Open Source",
+      "category": "database"
+    },
+    {
+      "pattern": "\\b(redis)\\b",
+      "flags": "i",
+      "product": "Redis",
+      "technology": "redis",
+      "vendor": "Open Source",
+      "category": "cache"
+    },
+    {
+      "pattern": "\\bgrafana\\b",
+      "flags": "i",
+      "product": "Grafana",
+      "technology": "grafana",
+      "vendor": "Open Source",
+      "category": "observability"
+    },
+    {
+      "pattern": "\\bprometheus\\b",
+      "flags": "i",
+      "product": "Prometheus",
+      "technology": "prometheus",
+      "vendor": "Open Source",
+      "category": "observability"
+    },
+    {
+      "pattern": "\\b(powerdns|pdns)\\b",
+      "flags": "i",
+      "product": "PowerDNS",
+      "technology": "dns",
+      "vendor": "Open Source",
+      "category": "dns"
+    },
+    {
+      "pattern": "\\b(postfix|exim|sendmail)\\b",
+      "flags": "i",
+      "product": "SMTP",
+      "technology": "smtp",
+      "category": "mail"
+    },
+    {
+      "pattern": "\\bopenssh\\b",
+      "flags": "i",
+      "product": "SSH",
+      "technology": "ssh",
+      "category": "infrastructure"
+    },
+    {
+      "pattern": "\\bdovecot\\b",
+      "flags": "i",
+      "product": "IMAPS",
+      "technology": "imap",
+      "category": "mail"
+    },
+    {
+      "pattern": "\\bmikrotik|routeros\\b",
+      "flags": "i",
+      "product": "Mikrotik",
+      "technology": "mikrotik",
+      "vendor": "MikroTik",
+      "category": "router"
+    },
+    {
+      "pattern": "\\bcisco\\b",
+      "flags": "i",
+      "product": "Cisco Network Device",
+      "technology": "cisco",
+      "vendor": "Cisco",
+      "category": "switch"
+    },
+    {
+      "pattern": "\\bfortinet|fortigate|fortios\\b",
+      "flags": "i",
+      "product": "Fortinet Firewall",
+      "technology": "fortinet",
+      "vendor": "Fortinet",
+      "category": "firewall"
+    },
+    {
+      "pattern": "\\bubiquiti|unifi\\b",
+      "flags": "i",
+      "product": "Ubiquiti AP",
+      "technology": "ubiquiti",
+      "vendor": "Ubiquiti",
+      "category": "ap"
+    },
+    {
+      "pattern": "\\bhewlett packard\\b|\\bhp\\b",
+      "flags": "i",
+      "product": "HP Network Device",
+      "technology": "hp",
+      "vendor": "HP",
+      "category": "switch"
+    },
+    {
+      "pattern": "\\bhikvision\\b",
+      "flags": "i",
+      "product": "Hikvision",
+      "technology": "hikvision",
+      "vendor": "Hikvision",
+      "category": "iot"
+    },
+    {
+      "pattern": "\\bdahua\\b",
+      "flags": "i",
+      "product": "Dahua Camera",
+      "technology": "dahua",
+      "vendor": "Dahua",
+      "category": "iot"
+    },
+    {
+      "pattern": "\\bintelbras\\b",
+      "flags": "i",
+      "product": "Intelbras",
+      "technology": "intelbras",
+      "vendor": "Intelbras",
+      "category": "iot"
+    },
+    {
+      "pattern": "\\bcontrolid|faceid\\b",
+      "flags": "i",
+      "product": "ControlID FaceID",
+      "technology": "controlid-faceid",
+      "vendor": "ControlID",
+      "category": "iot"
+    },
+    {
+      "pattern": "\\bgrandstream\\b",
+      "flags": "i",
+      "product": "Grandstream",
+      "technology": "grandstream",
+      "vendor": "Grandstream",
+      "category": "voice"
+    },
+    {
+      "pattern": "\\byealink\\b",
+      "flags": "i",
+      "product": "Yealink SIP Phone",
+      "technology": "yealink",
+      "vendor": "Yealink",
+      "category": "voice"
+    },
+    {
+      "pattern": "\\blinux\\b.+\\b(avahi|minidlna|posix|debian|ubuntu|fedora|arch)\\b|\\blinux\\/",
+      "flags": "i",
+      "product": "Linux Host",
+      "technology": "linux",
+      "vendor": "Linux",
+      "category": "host"
+    },
+    {
+      "pattern": "\\bwindows\\b.+\\b(upnp|microsoft)\\b",
+      "flags": "i",
+      "product": "Windows Host",
+      "technology": "windows",
+      "vendor": "Microsoft",
+      "category": "host"
+    },
+    {
+      "pattern": "\\bmacos\\b|mac os x",
+      "flags": "i",
+      "product": "macOS Host",
+      "technology": "macos",
+      "vendor": "Apple",
+      "category": "host"
+    },
+    {
+      "pattern": "smarttv|_airplay|mediarenderer|mediaserver|dlna|upnp",
+      "flags": "i",
+      "product": "TV / Media Device",
+      "technology": "upnp-media",
+      "category": "media"
+    },
+    {
+      "pattern": "_googlecast|googlecast|_androidtvremote|android(?!tv)|samsung|xiaomi|redmi|miui|motorola|\\bmoto[_ ]|pixel",
+      "flags": "i",
+      "product": "Smartphone",
+      "technology": "android",
+      "category": "mobile"
+    },
+    {
+      "pattern": "_companion-link|_continuity|_airdrop|iphone|ipad",
+      "flags": "i",
+      "product": "Smartphone",
+      "technology": "ios",
+      "vendor": "Apple",
+      "category": "mobile"
+    },
+    {
+      "pattern": "\\basterisk\\b",
+      "flags": "i",
+      "product": "Asterisk PBX",
+      "technology": "asterisk",
+      "vendor": "Asterisk",
+      "category": "voice"
+    },
+    {
+      "pattern": "\\bfreepbx\\b",
+      "flags": "i",
+      "product": "FreePBX",
+      "technology": "asterisk",
+      "vendor": "Sangoma",
+      "category": "voice"
+    },
+    {
+      "pattern": "\\bsnom\\b",
+      "flags": "i",
+      "product": "Snom Phone",
+      "technology": "sip",
+      "vendor": "Snom",
+      "category": "voice"
+    },
+    {
+      "pattern": "\\bcisco.*cucm\\b",
+      "flags": "i",
+      "product": "Cisco CUCM",
+      "technology": "sip",
+      "vendor": "Cisco",
+      "category": "voice"
+    },
+    {
+      "pattern": "Grandstream.*GXP",
+      "flags": "i",
+      "product": "Grandstream GXP",
+      "technology": "grandstream",
+      "vendor": "Grandstream",
+      "category": "voice"
+    },
+    {
+      "pattern": "Grandstream.*UCM",
+      "flags": "i",
+      "product": "Grandstream UCM",
+      "technology": "grandstream",
+      "vendor": "Grandstream",
+      "category": "voice"
+    },
+    {
+      "pattern": "\\b(?:apache\\s*(?:tomcat|coyote)|tomcat|ajp|catalina)\\b",
+      "flags": "i",
+      "product": "Apache Tomcat",
+      "technology": "tomcat",
+      "vendor": "Apache Software Foundation",
+      "category": "application"
+    },
+    {
+      "pattern": "\\bjava\\b|\\bjvm\\b|\\bspring\\s*boot\\b|\\bjboss\\b|\\bwildfly\\b|\\bjetty\\b|\\bglassfish\\b",
+      "flags": "i",
+      "product": "Java Application Server",
+      "technology": "java",
+      "vendor": "Java Ecosystem",
+      "category": "application"
+    }
+  ],
+  "thresholds": {
+    "auto_approve": 0.85,
+    "medium": 0.6,
+    "low": 0.35,
+    "conflict": 0.45,
+    "minimum_evidence_to_classify": 2
+  },
+  "rules": [
+    {
+      "asset_type": "camera_ip",
+      "product": "IP Camera",
+      "category": "iot",
+      "technology": "camera",
+      "threshold": 0.58,
+      "weights": {
+        "rtsp_response": 0.33,
+        "onvif_device_info": 0.34,
+        "mdns_service": 0.18,
+        "ssdp_response": 0.12,
+        "tcp_open_port": 0.04,
+        "udp_open_port": 0.04,
+        "vendor_identity": 0.12,
+        "topology_context": 0.16,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "rtsp",
+        "onvif",
+        "hikvision",
+        "dahua",
+        "intelbras",
+        "camera"
+      ],
+      "topology": [
+        "poe",
+        "edge_port"
+      ]
+    },
+    {
+      "asset_type": "voice_endpoint",
+      "product": "SIP Endpoint",
+      "category": "voice",
+      "technology": "sip",
+      "threshold": 0.48,
+      "weights": {
+        "sip_options_response": 0.55,
+        "tcp_open_port": 0.04,
+        "udp_open_port": 0.04,
+        "service_banner": 0.08,
+        "text_fingerprint": 0.18,
+        "mdns_service": 0.16,
+        "vendor_identity": 0.12,
+        "topology_context": 0.18,
+        "protocol_behavior": 0.18,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "sip",
+        "asterisk",
+        "grandstream",
+        "yealink"
+      ],
+      "topology": [
+        "voice_vlan"
+      ]
+    },
+    {
+      "asset_type": "iot_device",
+      "product": "IoT Device",
+      "category": "iot",
+      "technology": "iot",
+      "threshold": 0.45,
+      "weights": {
+        "onvif_device_info": 0.3,
+        "text_fingerprint": 0.25,
+        "tcp_open_port": 0.04,
+        "mdns_service": 0.16,
+        "vendor_identity": 0.12,
+        "topology_context": 0.1,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "onvif",
+        "controlid-faceid",
+        "hikvision",
+        "dahua",
+        "intelbras",
+        "matter"
+      ],
+      "topology": [
+        "poe",
+        "edge_port"
+      ]
+    },
+    {
+      "asset_type": "database",
+      "product": "Database Service",
+      "category": "database",
+      "technology": "database",
+      "threshold": 0.28,
+      "weights": {
+        "tcp_open_port": 0.04,
+        "service_banner": 0.26,
+        "text_fingerprint": 0.2,
+        "tls_certificate": 0.08,
+        "deep_probe": 0.48,
+        "historical_identity": 0.1
+      },
+      "technologies": [
+        "postgres",
+        "mysql",
+        "mariadb"
+      ]
+    },
+    {
+      "asset_type": "observability_service",
+      "product": "Observability Service",
+      "category": "observability",
+      "technology": "observability",
+      "threshold": 0.36,
+      "weights": {
+        "tcp_open_port": 0.04,
+        "http_header": 0.24,
+        "http_title": 0.24,
+        "text_fingerprint": 0.22,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "prometheus",
+        "grafana",
+        "node-exporter",
+        "postgres-exporter",
+        "nginx-exporter"
+      ]
+    },
+    {
+      "asset_type": "network_device",
+      "product": "Network Device",
+      "category": "switch",
+      "technology": "network",
+      "threshold": 0.4,
+      "weights": {
+        "snmp_sysdescr": 0.34,
+        "lldp_neighbor": 0.24,
+        "ssdp_response": 0.12,
+        "text_fingerprint": 0.2,
+        "vendor_identity": 0.14,
+        "topology_context": 0.16,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "cisco",
+        "mikrotik",
+        "ubiquiti",
+        "fortinet",
+        "hp"
+      ]
+    },
+    {
+      "asset_type": "web_service",
+      "product": "HTTP Service",
+      "category": "web",
+      "technology": "web",
+      "threshold": 0.46,
+      "weights": {
+        "tcp_open_port": 0.04,
+        "http_header": 0.24,
+        "http_title": 0.22,
+        "tls_certificate": 0.12,
+        "favicon_hash": 0.12,
+        "text_fingerprint": 0.18,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "http",
+        "apache",
+        "nginx"
+      ]
+    },
+    {
+      "asset_type": "media_device",
+      "product": "TV / Media Device",
+      "category": "media",
+      "technology": "upnp-media",
+      "threshold": 0.5,
+      "weights": {
+        "mdns_service": 0.3,
+        "ssdp_response": 0.3,
+        "text_fingerprint": 0.2,
+        "vendor_identity": 0.08,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "upnp-media",
+        "airplay",
+        "chromecast",
+        "androidtv"
+      ]
+    },
+    {
+      "asset_type": "mobile_device",
+      "product": "Smartphone",
+      "category": "mobile",
+      "technology": "mobile",
+      "threshold": 0.5,
+      "weights": {
+        "mdns_service": 0.3,
+        "text_fingerprint": 0.22,
+        "vendor_identity": 0.14,
+        "passive_behavior": 0.16,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "android",
+        "ios"
+      ]
+    },
+    {
+      "asset_type": "host",
+      "product": "Host",
+      "category": "host",
+      "technology": "host",
+      "threshold": 0.48,
+      "weights": {
+        "ssh_banner": 0.22,
+        "text_fingerprint": 0.22,
+        "mdns_service": 0.2,
+        "ssdp_response": 0.12,
+        "reverse_dns": 0.08,
+        "historical_identity": 0.1
+      },
+      "technologies": [
+        "linux",
+        "windows",
+        "macos",
+        "ssh"
+      ]
+    },
+    {
+      "asset_type": "application_server",
+      "product": "Application Server",
+      "category": "application",
+      "technology": "java",
+      "threshold": 0.40,
+      "weights": {
+        "tcp_open_port": 0.06,
+        "tcp_filtered_port": 0.03,
+        "http_header": 0.18,
+        "http_title": 0.14,
+        "tls_certificate": 0.10,
+        "text_fingerprint": 0.14,
+        "vendor_identity": 0.08,
+        "network_distance": 0.06,
+        "arp_discovery": 0.06,
+        "mac_structure": 0.04,
+        "os_detection": 0.06,
+        "host_alive": 0.04,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "java",
+        "tomcat",
+        "apache",
+        "nginx",
+        "http"
+      ],
+      "topology": []
+    },
+    {
+      "asset_type": "gateway",
+      "product": "Default Gateway",
+      "category": "router",
+      "technology": "gateway",
+      "threshold": 0.40,
+      "weights": {
+        "topology_context": 0.50,
+        "arp_discovery": 0.10,
+        "vendor_identity": 0.10,
+        "mac_structure": 0.10,
+        "tcp_open_port": 0.04,
+        "network_distance": 0.04,
+        "host_alive": 0.04,
+        "historical_identity": 0.08
+      },
+      "technologies": [
+        "gateway"
+      ],
+      "topology": [
+        "gateway"
+      ]
+    },
+    {
+      "asset_type": "local_host",
+      "product": "Scanner Host",
+      "category": "host",
+      "technology": "scanner",
+      "threshold": 0.40,
+      "weights": {
+        "topology_context": 0.55,
+        "arp_discovery": 0.10,
+        "network_distance": 0.06,
+        "host_alive": 0.06,
+        "tcp_open_port": 0.04,
+        "historical_identity": 0.10
+      },
+      "technologies": [
+        "scanner"
+      ],
+      "topology": [
+        "localhost"
+      ]
+    }
+  ]
+}

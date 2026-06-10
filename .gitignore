@@ -1,0 +1,40 @@
+# Dependências
+node_modules/
+
+# Environment (NUNCA commitar arquivos .env)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Build / dist
+dist/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Docker volumes (dados locais)
+*-data/
+
+# Coverage / testes
+coverage/
+.nyc_output/
+tests/playwright-report/
+
+# Dados sensíveis
+*.pem
+*.key
+*.token.env
+
+# Backup files
+*.bak
+*~

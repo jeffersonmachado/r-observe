@@ -1,0 +1,101 @@
+# ─── R-Observe Dev Override ──────────────────────────────────────────────────
+# Hot reload sem rebuild: monta src/ como volume e usa node --watch (Node 20+).
+#
+# Uso:
+#   1. Subir infra:  docker compose -f docker-compose.observe.yml --env-file .env.observe --profile observe-core up -d
+#   2. Subir servicos com hot reload:
+#      docker compose -f docker-compose.observe.yml -f docker-compose.observe.dev.yml --env-file .env.observe \
+#        --profile observe-core --profile observe-ai --profile observe-agent --profile observe-discovery up -d
+#
+#   3. Ver logs:     docker compose -f docker-compose.observe.yml --env-file .env.observe logs -f r-observe-api r-observe-discovery
+#   4. Parar:        docker compose -f docker-compose.observe.yml -f docker-compose.observe.dev.yml --env-file .env.observe down
+#
+# Alias rápido (adicione ao seu .bashrc):
+#   alias observe-dev='docker compose -f docker-compose.observe.yml -f docker-compose.observe.dev.yml --env-file .env.observe'
+#   alias observe-dev-up='observe-dev --profile observe-core --profile observe-ai --profile observe-agent --profile observe-discovery up -d'
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ─── R-OBSERVE API (dev) ────────────────────────────────────────────────────
+  r-observe-api:
+    user: root
+    volumes:
+      - ./r-observe/api/src:/app/src
+      - ./r-observe/migrations:/app/migrations
+      - ./r-observe/api/public:/app/public
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: debug
+      AI_SETTINGS_RECONCILE_STRICT: "false"
+    command:
+      - node
+      - "--watch-path=/app/src"
+      - "--watch-path=/app/migrations"
+      - "--require"
+      - "./src/tracing.js"
+      - "src/index.js"
+
+  # ─── R-OBSERVE DISCOVERY (dev) ──────────────────────────────────────────────
+  r-observe-discovery:
+    volumes:
+      - ./r-observe/discovery/src:/app/src
+      - ./r-observe/discovery/public:/app/public
+      - ./r-observe/discovery/tests:/app/tests
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: debug
+      DISCOVERY_SCAN_QUEUE_ENABLED: "false"
+      DISCOVERY_PASSIVE_LISTENERS_ENABLED: "false"
+      DISCOVERY_DOCKER_ENABLED: "true"
+    command:
+      - node
+      - "--watch-path=/app/src"
+      - "--require"
+      - "./src/telemetry/tracing.js"
+      - "src/index.js"
+
+  # ─── R-OBSERVE WORKER (dev) ─────────────────────────────────────────────────
+  r-observe-worker:
+    volumes:
+      - ./r-observe/worker/src:/app/src
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+      AI_ENABLED: "true"
+      AI_SERVICE_URL: http://r-observe-ai:3000
+      REMEDIATION_ENABLED: "true"
+    command:
+      - node
+      - "--watch-path=/app/src"
+      - "--require"
+      - "./src/tracing.js"
+      - "src/index.js"
+
+  # ─── R-OBSERVE AI (dev) ─────────────────────────────────────────────────────
+  r-observe-ai:
+    volumes:
+      - ./r-observe/ai/src:/app/src
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+    command:
+      - node
+      - "--watch-path=/app/src"
+      - "--require"
+      - "./src/tracing.js"
+      - "src/index.js"
+
+  # ─── R-OBSERVE AGENT (dev) ──────────────────────────────────────────────────
+  r-observe-agent:
+    volumes:
+      - ./r-observe/agent/src:/app/src
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+    command:
+      - node
+      - "--watch-path=/app/src"
+      - "--require"
+      - "./src/tracing.js"
+      - "src/index.js"

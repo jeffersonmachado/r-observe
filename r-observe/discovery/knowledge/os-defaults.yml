@@ -1,0 +1,71 @@
+# R-Observe Discovery — OS-Defaults
+# Mapeia sistemas operacionais para exporters e checks implícitos.
+# Hot-reload: alterações entram em vigor sem restart.
+#
+# Estes serviços são injetados mesmo que a porta não tenha sido detectada
+# no scan ativo — a presença do SO é inferida por fingerprint (SSH, mDNS,
+# DHCP, SNMP, cloud API, etc.).
+
+defaults:
+  linux:
+    exporters:
+      - port: 9100
+        protocol: tcp
+        job: node-exporter
+        reason: "Host Linux detectado — métricas de sistema recomendadas"
+    icinga_checks:
+      - type: hostalive
+        check_command: hostalive
+        reason: "Verificação básica de conectividade"
+      - type: load
+        check_command: load
+        warning: 5,10,15
+        critical: 10,20,30
+        reason: "Carga do sistema"
+      - type: disk
+        check_command: disk
+        warning: "20%"
+        critical: "10%"
+        reason: "Espaço em disco"
+
+  windows:
+    exporters:
+      - port: 9182
+        protocol: tcp
+        job: windows-exporter
+        reason: "Host Windows detectado — métricas de sistema recomendadas"
+    icinga_checks:
+      - type: hostalive
+        check_command: hostalive
+      - type: disk
+        check_command: disk-windows
+        warning: "20%"
+        critical: "10%"
+
+  darwin:
+    exporters:
+      - port: 9100
+        protocol: tcp
+        job: node-exporter
+        reason: "Host macOS detectado"
+
+  freebsd:
+    exporters:
+      - port: 9100
+        protocol: tcp
+        job: node-exporter
+        reason: "Host FreeBSD detectado"
+
+  network_device:
+    exporters:
+      - port: 161
+        protocol: udp
+        job: snmp-exporter
+        reason: "Dispositivo de rede detectado — SNMP recomendado"
+
+  vmware:
+    exporters:
+      - port: 9272
+        protocol: tcp
+        job: vmware-exporter
+        reason: "Host VMware ESXi detectado"
