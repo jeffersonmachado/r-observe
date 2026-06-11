@@ -1,8 +1,17 @@
 'use strict';
 
-// JWT_SECRET precisa estar definido antes do require do event-processor
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+// Chaves RS256 de teste precisam estar no ambiente antes do require do jwt.js,
+// pois o event-processor assina tokens internos com a chave privada.
+const crypto = require('crypto');
+{
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  process.env.JWT_PRIVATE_KEY = privateKey;
+  process.env.JWT_PUBLIC_KEY = publicKey;
+}
 
 const assert = require('node:assert/strict');
 const { describe, it, beforeEach } = require('node:test');

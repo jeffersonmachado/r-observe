@@ -1,11 +1,24 @@
 'use strict';
 
-// JWT_SECRET precisa estar definido antes do require do middleware
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+// Chaves RS256 de teste precisam estar no ambiente ANTES do require do jwt.js,
+// pois as chaves são carregadas no momento do import do módulo.
+const crypto = require('crypto');
+const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+});
+process.env.JWT_PRIVATE_KEY = privateKey;
+process.env.JWT_PUBLIC_KEY = publicKey;
 
 const assert = require('node:assert/strict');
 const { describe, it, beforeEach } = require('node:test');
+const jwt = require('jsonwebtoken');
 const { createAuthMiddleware } = require('../src/middleware/auth');
+
+function signToken(claims = {}) {
+  return jwt.sign({ sub: 'svc', role: 'admin', ...claims }, privateKey, { algorithm: 'RS256', expiresIn: '5m' });
+}
 
 function mockDb(rows = []) {
   return {
@@ -46,11 +59,10 @@ function mockLog() {
 
 describe('Auth Middleware', () => {
   let auth;
-  const JWT_SECRET = 'test-token-secret';
   const SESSION_COOKIE = 'observe_session';
 
   beforeEach(() => {
-    auth = createAuthMiddleware(mockDb(), JWT_SECRET, SESSION_COOKIE, mockLog());
+    auth = createAuthMiddleware(mockDb(), SESSION_COOKIE, mockLog());
   });
 
   it('requireAuth retorna 401 sem token nem sessao', async () => {
@@ -64,32 +76,49 @@ describe('Auth Middleware', () => {
     assert.equal(nextCalled, false);
   });
 
-  it('requireAuth aceita JWT_SECRET raw', async () => {
-    const req = mockReq({ token: JWT_SECRET });
+  it('requireAuth aceita JWT assinado (RS256) no x-internal-token', async () => {
+    const req = mockReq({ token: signToken({ sub: 'r-observe-worker' }) });
     const res = mockRes();
     let nextCalled = false;
 
     await auth.requireAuth(req, res, () => { nextCalled = true; });
 
     assert.equal(nextCalled, true);
-    assert.equal(req.auth.type, 'token');
+    assert.equal(req.auth.type, 'jwt');
     assert.equal(req.auth.role, 'admin');
   });
 
-  it('requireAuth aceita JWT_SECRET via Bearer', async () => {
-    const req = mockReq({ authHeader: `Bearer ${JWT_SECRET}` });
+  it('requireAuth aceita JWT assinado via Bearer', async () => {
+    const req = mockReq({ authHeader: `Bearer ${signToken()}` });
     const res = mockRes();
     let nextCalled = false;
 
     await auth.requireAuth(req, res, () => { nextCalled = true; });
 
     assert.equal(nextCalled, true);
-    assert.equal(req.auth.type, 'token');
+    assert.equal(req.auth.type, 'jwt');
     assert.equal(req.auth.role, 'admin');
   });
 
-  it('requireAuth rejeita token invalido', async () => {
-    const req = mockReq({ token: 'wrong-token' });
+  it('requireAuth rejeita token nao-JWT (sem fallback raw)', async () => {
+    const req = mockReq({ token: 'qualquer-segredo-raw' });
+    const res = mockRes();
+    let nextCalled = false;
+
+    await auth.requireAuth(req, res, () => { nextCalled = true; });
+
+    assert.equal(res.statusCode, 401);
+    assert.equal(nextCalled, false);
+  });
+
+  it('requireAuth rejeita JWT assinado com chave estranha', async () => {
+    const other = crypto.generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    });
+    const forged = jwt.sign({ sub: 'x', role: 'admin' }, other.privateKey, { algorithm: 'RS256', expiresIn: '5m' });
+    const req = mockReq({ token: forged });
     const res = mockRes();
     let nextCalled = false;
 
@@ -100,11 +129,6 @@ describe('Auth Middleware', () => {
   });
 
   it('requireAuth aceita sessao valida', async () => {
-    const db = mockDb([{ username: 'ops', role: 'operator', expires_at: new Date(Date.now() + 3600000) }]);
-    const localAuth = createAuthMiddleware(db, JWT_SECRET, SESSION_COOKIE, mockLog());
-
-    // sessionHash do token 'valid-session-token' precisa bater com o que está no mock
-    const crypto = require('crypto');
     const token = 'valid-session-token';
     const hash = crypto.createHash('sha256').update(token).digest('hex');
 
@@ -118,7 +142,7 @@ describe('Auth Middleware', () => {
       },
     };
 
-    const authWithSession = createAuthMiddleware(dbWithHash, JWT_SECRET, SESSION_COOKIE, mockLog());
+    const authWithSession = createAuthMiddleware(dbWithHash, SESSION_COOKIE, mockLog());
     const req = mockReq({ cookie: `${SESSION_COOKIE}=${token}` });
     const res = mockRes();
     let nextCalled = false;
@@ -145,7 +169,7 @@ describe('Auth Middleware', () => {
 
   it('requireRole admin permite admin', () => {
     const middleware = auth.requireRole('admin');
-    const req = { auth: { type: 'token', user: 'admin', role: 'admin' } };
+    const req = { auth: { type: 'jwt', user: 'admin', role: 'admin' } };
     const res = mockRes();
     let nextCalled = false;
 
@@ -175,7 +199,7 @@ describe('Auth Middleware', () => {
   });
 
   it('requireAdmin e alias de requireRole("admin")', () => {
-    const req = { auth: { type: 'token', user: 'admin', role: 'admin' } };
+    const req = { auth: { type: 'jwt', user: 'admin', role: 'admin' } };
     const res = mockRes();
     let nextCalled = false;
 

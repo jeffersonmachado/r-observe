@@ -11,7 +11,6 @@ const { createLifecycle } = require('../shared/lifecycle');
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT           = parseInt(process.env.PORT || '3000', 10);
 const LOG_LEVEL      = process.env.LOG_LEVEL || 'info';
-const JWT_SECRET = process.env.JWT_SECRET || '';
 const AI_ENABLED     = process.env.AI_ENABLED === 'true';
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://observe-ai:3000';
 const QUEUE_KEYS             = ['observe:events', 'observe:events:icinga', 'observe:remediation:execute', 'observe:scan:results'];

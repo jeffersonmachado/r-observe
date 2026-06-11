@@ -38,3 +38,8 @@ tests/playwright-report/
 # Backup files
 *.bak
 *~
+
+# Chaves de assinatura JWT (geradas no servidor, nunca versionadas)
+secrets/
+jwt_private.pem
+jwt_public.pem

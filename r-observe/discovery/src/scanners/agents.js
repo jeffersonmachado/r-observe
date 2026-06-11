@@ -20,11 +20,11 @@
 // Registro: agentes se registram ao iniciar e enviam heartbeat.
 
 const { log } = require('../utils/logger');
+const { signInternalToken } = require('../jwt');
 
 // ── Agente: heartbeat e registro ─────────────────────────────────────────
 
 const AGENT_API_URL = process.env.DISCOVERY_AGENT_API_URL || 'http://r-observe-discovery:3010';
-const AGENT_TOKEN = process.env.DISCOVERY_AGENT_TOKEN || process.env.JWT_SECRET || '';
 const AGENT_ID = process.env.DISCOVERY_AGENT_ID || `agent-${require('os').hostname()}`;
 const AGENT_HEARTBEAT_MS = parseInt(process.env.DISCOVERY_AGENT_HEARTBEAT_MS || '60000', 10);
 
@@ -35,7 +35,7 @@ async function registerAgent({ agentId, hostname, subnets, capabilities }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-Token': AGENT_TOKEN,
+        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'admin' }),
       },
       body: JSON.stringify({
         agent_id: agentId || AGENT_ID,
@@ -67,7 +67,7 @@ async function sendHeartbeat({ agentId }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-Token': AGENT_TOKEN,
+        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'admin' }),
       },
       body: JSON.stringify({
         agent_id: agentId || AGENT_ID,
@@ -176,7 +176,7 @@ async function reportScanResults({ agentId, assets, findings }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-Token': AGENT_TOKEN,
+        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'admin' }),
       },
       body: JSON.stringify({
         agent_id: agentId || AGENT_ID,

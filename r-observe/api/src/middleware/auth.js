@@ -94,27 +94,26 @@ async function authenticateSession(req, db, sessionCookieName) {
   };
 }
 
-async function authenticateRequest(req, db, internalToken, sessionCookieName) {
-  if (!internalToken) return { type: 'dev', user: 'dev', role: 'admin' };
+async function authenticateRequest(req, db, sessionCookieName) {
   const provided = req.headers['x-internal-token'] ||
     (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
-  if (!provided) return authenticateSession(req, db, sessionCookieName);
-  // Aceita token fixo raw (compatibilidade)
-  if (provided === internalToken) {
-    return { type: 'token', user: 'internal', role: 'admin' };
+  // M2M: JWT interno assinado com a chave privada (RS256), verificado pela pública.
+  if (provided) {
+    const jwtPayload = verifyInternalToken(provided);
+    if (jwtPayload) {
+      return { type: 'jwt', user: jwtPayload.sub || 'internal', role: jwtPayload.role || 'admin' };
+    }
+    // Token apresentado porém inválido: falha-fechado, não cai para sessão.
+    return null;
   }
-  // Aceita JWT assinado com JWT_SECRET
-  const jwtPayload = verifyInternalToken(provided);
-  if (jwtPayload) {
-    return { type: 'jwt', user: jwtPayload.sub || 'internal', role: jwtPayload.role || 'admin' };
-  }
+  // Usuário no navegador: sessão por cookie.
   return authenticateSession(req, db, sessionCookieName);
 }
 
-function createAuthMiddleware(db, internalToken, sessionCookieName, log) {
+function createAuthMiddleware(db, sessionCookieName, log) {
   async function requireAuth(req, res, next) {
     try {
-      const auth = await authenticateRequest(req, db, internalToken, sessionCookieName);
+      const auth = await authenticateRequest(req, db, sessionCookieName);
       if (!auth) return res.status(401).json({ error: 'Unauthorized' });
       req.auth = auth;
       next();

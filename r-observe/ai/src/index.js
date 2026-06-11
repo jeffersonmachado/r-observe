@@ -10,7 +10,6 @@ const { createLifecycle } = require('../shared/lifecycle');
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT           = parseInt(process.env.PORT || '3000', 10);
 const LOG_LEVEL      = process.env.LOG_LEVEL || 'info';
-const JWT_SECRET = process.env.JWT_SECRET || '';
 const AI_TIMEOUT_MS  = parseInt(process.env.AI_TIMEOUT_MS || '30000', 10);
 
 const {

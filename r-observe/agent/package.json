@@ -21,6 +21,7 @@
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "dockerode": "^4.0.2",
     "express": "^4.19.2",
-    "helmet": "^7.1.0"
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.3"
   }
 }

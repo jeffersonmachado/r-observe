@@ -10,11 +10,11 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const { createLifecycle } = require('../shared/lifecycle');
+const { signInternalToken } = require('./jwt');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
 const API_URL = process.env.API_URL || 'http://observe-api:3000';
 const API_BASE_PATH = process.env.API_BASE_PATH || '/observe/api';
 const CHECK_INTERVAL_MS = parseInt(process.env.CHECK_INTERVAL_MS || '60000', 10);
@@ -100,7 +100,7 @@ async function sendEvent(type, data) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-internal-token': AGENT_TOKEN,
+        'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }),
       },
       body: JSON.stringify({
         type,
@@ -128,7 +128,7 @@ async function postInventory(containers) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-internal-token': AGENT_TOKEN,
+        'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }),
       },
       body: JSON.stringify({
         agent_id: AGENT_ID,
@@ -289,7 +289,7 @@ async function checkHTTP(url, label) {
   try {
     const resp = await fetch(url, {
       signal: AbortSignal.timeout(5000),
-      headers: { 'x-internal-token': AGENT_TOKEN },
+      headers: { 'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }) },
     });
     if (!resp.ok) {
       await sendEvent('check.failed', {
@@ -356,7 +356,7 @@ async function postStaticHosts() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-internal-token': AGENT_TOKEN,
+          'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }),
         },
         body: JSON.stringify({
           name: h.name,

@@ -1,9 +1,9 @@
 'use strict';
 
 const { log } = require('../utils/logger');
+const { signInternalToken } = require('../jwt');
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || process.env.DISCOVERY_AI_URL || 'http://127.0.0.1:3011';
-const JWT_SECRET = process.env.JWT_SECRET || '';
 const AI_TIMEOUT_MS  = parseInt(process.env.AI_FINGERPRINT_TIMEOUT_MS || '8000', 10);
 const CACHE_TTL_MS   = parseInt(process.env.AI_FINGERPRINT_CACHE_TTL_MS || String(24 * 60 * 60 * 1000), 10); // 24h
 
@@ -52,7 +52,7 @@ async function aiFingerprint(signals) {
       method: 'POST',
       headers: {
         'Content-Type':   'application/json',
-        'x-internal-token': JWT_SECRET,
+        'x-internal-token': signInternalToken({ sub: 'r-observe-discovery', service: 'ai', role: 'admin' }),
       },
       body: JSON.stringify({ signals }),
       signal: controller.signal,

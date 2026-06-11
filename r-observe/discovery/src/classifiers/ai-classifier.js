@@ -8,11 +8,11 @@
  */
 
 const { debug, log } = require('../utils/logger');
+const { signInternalToken } = require('../jwt');
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://r-observe-ai:3000';
 const AI_TIMEOUT_MS = parseInt(process.env.AI_CLASSIFY_TIMEOUT_MS || '4000', 10);
 const AI_ENABLED = process.env.DISCOVERY_AI_CLASSIFY_ENABLED !== 'false';
-const JWT_SECRET = process.env.JWT_SECRET || '';
 
 // Cache: "ip:port" → { service, confidence, timestamp }
 const _cache = new Map();
@@ -44,7 +44,7 @@ async function classifyService(ip, port, currentLabel, evidence = {}) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-internal-token': JWT_SECRET,
+        'x-internal-token': signInternalToken({ sub: 'r-observe-discovery', service: 'ai', role: 'admin' }),
       },
       body: JSON.stringify({
         ip,

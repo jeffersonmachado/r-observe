@@ -21,7 +21,6 @@ const { createLifecycle } = require('../shared/lifecycle');
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BASE = process.env.BASE_PATH || '/observe/api';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-const JWT_SECRET = process.env.JWT_SECRET || '';
 const SESSION_COOKIE = process.env.OBSERVE_SESSION_COOKIE || 'observe_session';
 const SESSION_TTL_HOURS = parseInt(process.env.OBSERVE_SESSION_TTL_HOURS || '12', 10);
 const AI_SETTINGS_RECONCILE_INTERVAL_MS = parseInt(process.env.AI_SETTINGS_RECONCILE_INTERVAL_MS || '60000', 10);
@@ -193,7 +192,7 @@ const {
   clearSessionCookie,
   getContactRole,
   authenticateRequest,
-} = createAuthMiddleware(db, JWT_SECRET, SESSION_COOKIE, log);
+} = createAuthMiddleware(db, SESSION_COOKIE, log);
 
 // ─── Rate limiters ────────────────────────────────────────────────────────────
 const RL_WINDOW = parseInt(process.env.OBSERVE_RATE_LIMIT_WINDOW_MS || '60000', 10);

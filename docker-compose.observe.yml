@@ -111,6 +111,9 @@ services:
         condition: service_healthy
       r-observe-redis:
         condition: service_healthy
+    secrets:
+      - jwt_private
+      - jwt_public
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
@@ -122,7 +125,8 @@ services:
       DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
       REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
       TENANT_MODE: ${R_OBSERVE_TENANT_MODE:-multi}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
+      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public
       WEBHOOK_SECRET: ${OBSERVE_WEBHOOK_SECRET:-}
       AI_SERVICE_URL: http://r-observe-ai:3000
       DISCOVERY_SERVICE_URL: http://r-observe-discovery:3010
@@ -178,6 +182,8 @@ services:
         condition: service_healthy
       r-observe-api:
         condition: service_healthy
+    secrets:
+      - jwt_private
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
@@ -187,7 +193,7 @@ services:
       DB_USER: ${OBSERVE_DB_USER:-observe}
       DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
       REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
       API_URL: http://r-observe-api:3000
       AI_SERVICE_URL: http://r-observe-ai:3000
       AI_ENABLED: ${R_OBSERVE_AI_ENABLED:-true}
@@ -237,6 +243,8 @@ services:
       dockerfile: ai/Dockerfile
     container_name: r-observe-ai
     profiles: [observe-ai]
+    secrets:
+      - jwt_public
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
@@ -245,7 +253,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AI_TIMEOUT_MS: ${R_OBSERVE_AI_TIMEOUT_MS:-30000}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public
       LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
       TZ: ${TZ:-America/Sao_Paulo}
       # ── OpenTelemetry ──────────────────────────────────────────────────────
@@ -281,10 +289,12 @@ services:
     depends_on:
       r-observe-api:
         condition: service_healthy
+    secrets:
+      - jwt_private
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
       API_URL: ${OBSERVE_AGENT_API_URL:-http://r-observe-api:3000}
       API_BASE_PATH: ${R_OBSERVE_API_BASE_PATH:-/observe/api}
       CHECK_INTERVAL_MS: ${OBSERVE_AGENT_CHECK_INTERVAL_MS:-60000}
@@ -340,6 +350,9 @@ services:
         condition: service_healthy
       r-observe-api:
         condition: service_healthy
+    secrets:
+      - jwt_private
+      - jwt_public
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3010
@@ -349,7 +362,8 @@ services:
       DB_USER: ${OBSERVE_DB_USER:-observe}
       DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
       REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET obrigatório - defina em .env.observe}
+      JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
+      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public
       LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
       DISCOVERY_SD_FILE: /app/data/sd/discovery-engine.json
       DISCOVERY_DOCKER_ENABLED: ${DISCOVERY_DOCKER_ENABLED:-true}
@@ -783,6 +797,12 @@ services:
       - observe-monitoring
 
 # ─── VOLUMES ─────────────────────────────────────────────────────────────────
+secrets:
+  jwt_private:
+    file: ./secrets/jwt_private.pem
+  jwt_public:
+    file: ./secrets/jwt_public.pem
+
 volumes:
   r-observe-postgres-data:
   r-observe-redis-data:
