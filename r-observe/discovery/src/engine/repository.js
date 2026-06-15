@@ -10,6 +10,72 @@ function isWeakProduct(v) { return WEAK_PRODUCTS.has(v ?? null); }
 function isIpLike(value) {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(value || '').trim());
 }
+
+/**
+ * Detecta se um IP é endereço de rede (.0) ou broadcast (.255).
+ */
+function isNetworkOrBroadcast(ip) {
+  const parts = String(ip).trim().split('.');
+  if (parts.length !== 4) return false;
+  const last = parseInt(parts[3], 10);
+  if (isNaN(last)) return false;
+  // /24 networks only — expandir se necessário
+  return last === 0 || last === 255;
+}
+
+/**
+ * Extrai OS hint de banners disponíveis: SNMP sysDescr, SSH banner, HTTP server.
+ */
+function extractOsHint(row) {
+  const scan = row.metadata?.scan || {};
+  const fp = row.metadata?.fingerprint || {};
+
+  // SNMP sysDescr — fonte mais confiável
+  const sysDescr = row.snmp_sysdescr
+    || scan.snmp_sysdescr
+    || scan.snmp?.sysDescr
+    || fp.raw_signals?.snmp_sysdescr
+    || '';
+  if (sysDescr) {
+    const low = sysDescr.toLowerCase();
+    if (low.includes('linux')) return 'Linux';
+    if (low.includes('ubuntu')) return 'Linux (Ubuntu)';
+    if (low.includes('debian')) return 'Linux (Debian)';
+    if (low.includes('alpine')) return 'Linux (Alpine)';
+    if (low.includes('centos') || low.includes('rhel') || low.includes('red hat')) return 'Linux (RHEL)';
+    if (low.includes('windows')) return 'Windows';
+    if (low.includes('mikrotik') || low.includes('routeros')) return 'RouterOS';
+    if (low.includes('cisco') && low.includes('ios')) return 'Cisco IOS';
+    if (low.includes('freebsd')) return 'FreeBSD';
+    if (low.includes('esxi') || low.includes('vmware')) return 'VMware ESXi';
+    if (low.includes('synology')) return 'Synology DSM';
+    return sysDescr.slice(0, 80);
+  }
+
+  // SSH banner
+  const ssh = row.ssh_banner
+    || scan.ssh_banner
+    || fp.raw_signals?.ssh_banner
+    || '';
+  if (ssh) {
+    const m = ssh.match(/SSH-\d+\.\d+-(\S+)/);
+    if (m) return m[1];
+    return ssh.slice(0, 40);
+  }
+
+  // HTTP server header
+  const http = row.http_server
+    || scan.http_server
+    || fp.raw_signals?.http_server
+    || '';
+  if (http) {
+    const m = http.match(/^(\S+)/);
+    if (m) return m[1];
+    return http.slice(0, 40);
+  }
+
+  return null;
+}
 function isWeakAssetName(value) {
   const name = String(value || '').trim();
   return !name || isIpLike(name) || /^asset-\d{1,3}(?:-\d{1,3}){3}$/.test(name);
@@ -69,6 +135,15 @@ async function completeRun(db, runId, status, summary) {
 }
 
 async function upsertAsset(db, row) {
+  // ── Filtro: ignora IPs de rede e broadcast ──────────────────────────────
+  const ip = row.primary_ip || '';
+  if (ip && isNetworkOrBroadcast(ip)) return null;
+
+  // ── OS hint a partir de banners ─────────────────────────────────────────
+  if (!row.os_hint) {
+    row.os_hint = extractOsHint(row);
+  }
+
   const existing = await findExistingAsset(db, row);
   const prev = existing.row || {};
 

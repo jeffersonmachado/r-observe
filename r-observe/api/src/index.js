@@ -217,7 +217,7 @@ app.post(`${BASE}/auth/login`, apiLimiter, async (req, res) => {
     if (!r.rowCount) return res.status(401).json({ error: 'Credenciais inválidas' });
 
     const user = r.rows[0].name;
-    const role = await getContactRole(user);
+    const role = await getContactRole(db, user);
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 60 * 60 * 1000);
 
@@ -233,7 +233,7 @@ app.post(`${BASE}/auth/login`, apiLimiter, async (req, res) => {
       expiresAt,
     ]);
 
-    setSessionCookie(req, res, token, expiresAt);
+    setSessionCookie(req, res, SESSION_COOKIE, token, expiresAt);
     res.json({ ok: true, user: { name: user, role }, expires_at: expiresAt.toISOString() });
   } catch (e) {
     log('warn', 'Login failed', { user: username, err: e.message });
@@ -652,10 +652,22 @@ app.post(`${BASE}/hosts/scan`, requireAuth, requireAdmin, async (req, res) => {
 // O API proxy injeta o token interno e repassa para o discovery.
 // Sem sessao → redirect para /observe/login.
 
+app.get('/observe/assets/:id', async (req, res) => {
+  try {
+    const auth = await authenticateRequest(req, db, SESSION_COOKIE);
+    if (!auth) return res.redirect(`/observe/login?next=${encodeURIComponent('/observe/assets/'+req.params.id)}`);
+    req.auth = auth;
+  } catch (_) {
+    return res.redirect(`/observe/login?next=${encodeURIComponent('/observe/assets/'+req.params.id)}`);
+  }
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.send(ASSET_DETAIL_HTML.replace('__ASSET_ID__', req.params.id));
+});
+
 app.get('/observe/discovery', async (req, res) => {
   // Verifica sessao manualmente e redireciona para login se ausente
   try {
-    const auth = await authenticateRequest(req);
+    const auth = await authenticateRequest(req, db, SESSION_COOKIE);
     if (!auth) return res.redirect(`/observe/login?next=${encodeURIComponent('/observe/discovery')}`);
     req.auth = auth;
   } catch (_) {
@@ -912,6 +924,159 @@ app.get(`${BASE}/ai/models`, requireAuth, async (req, res) => {
   });
 });
 
+
+// ── Asset Detail HTML ────────────────────────────────────────────────────
+const ASSET_DETAIL_HTML = `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>R-Observe · Ativo</title>
+<style>
+:root{--bg:#0f172a;--surface:#1e293b;--border:#334155;--text:#e2e8f0;--muted:#94a3b8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.topbar{display:flex;align-items:center;gap:1rem;padding:.75rem 1.5rem;background:var(--surface);border-bottom:1px solid var(--border)}
+.topbar img{height:28px}
+.topbar-title{font-size:.85rem;color:var(--muted)}
+.topbar a{color:var(--accent);text-decoration:none;font-size:.85rem}
+.topbar a:hover{text-decoration:underline}
+.container{max-width:1100px;margin:0 auto;padding:1.5rem}
+.back-link{display:inline-block;margin-bottom:1rem;color:var(--accent);text-decoration:none;font-size:.875rem}
+h1{font-size:1.5rem;margin-bottom:.25rem}
+.subtitle{color:var(--muted);margin-bottom:1.5rem}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.25rem}
+.card-title{font-size:.8rem;text-transform:uppercase;color:var(--muted);margin-bottom:1rem;letter-spacing:.05em}
+.info-row{display:flex;justify-content:space-between;padding:.5rem 0;border-bottom:1px solid var(--border);font-size:.875rem}
+.info-row:last-child{border-bottom:none}
+.info-label{color:var(--muted)}
+.info-value{font-weight:600;text-align:right}
+.badge{display:inline-block;padding:.15rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
+.badge-approved{background:#166534;color:#86efac}
+.badge-monitored{background:#1e40af;color:#93c5fd}
+.badge-discovered{background:#713f12;color:#fde047}
+.badge-ignored{background:#334155;color:#94a3b8}
+.badge-quarantined{background:#7f1d1d;color:#fca5a5}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{text-align:left;color:var(--muted);font-weight:600;padding:.5rem;border-bottom:2px solid var(--border)}
+td{padding:.5rem;border-bottom:1px solid var(--border)}
+.status-open{color:var(--green)}
+.status-closed{color:var(--red)}
+.status-filtered{color:var(--yellow)}
+.meta-json{font-size:.75rem;background:#0f172a;padding:.75rem;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:var(--muted);max-height:300px;overflow-y:auto}
+.loading{text-align:center;padding:3rem;color:var(--muted)}
+.error{text-align:center;padding:3rem;color:var(--red)}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <a href="/observe/home"><img src="/observe/api/ui/logo.svg" onerror="this.style.display='none'" alt="R"/></a>
+  <span class="topbar-title">Results · Sistemas de Informática / R-Observe</span>
+  <span style="flex:1"></span>
+  <a href="/observe/home">⌂ Home</a>
+  <a href="/observe/discovery">🔍 Discovery</a>
+  <a href="/observe/settings">⚙ Configuração</a>
+  <a href="/observe/api/auth/logout">Sair</a>
+</div>
+<div class="container">
+  <a href="/observe/discovery" class="back-link">← Voltar para Discovery</a>
+  <div id="content"><div class="loading">Carregando...</div></div>
+</div>
+<script>
+const ASSET_ID = '__ASSET_ID__';
+function toggleMeta(card){ var id = card.getAttribute("data-meta"); if (!id) return; var content = document.getElementById('mc-'+id); var title = card.querySelector('.card-title'); if (!content || !title) return; var isOpen = content.style.display !== 'none'; if (isOpen) { content.style.display = 'none'; title.textContent = title.textContent.replace(' ▾',' ▸'); return; } content.style.display = 'block'; title.textContent = title.textContent.replace(' ▸',' ▾'); if (content.dataset.loaded) return; content.dataset.loaded = '1'; var m = window._assetMeta || {}; var r = window._r || function(l,v){ return '<div class="info-row"><span class="info-label">'+l+'</span><span class="info-value">'+v+'</span></div>'; }; var hh = ''; if (id === 'scan') { var s = m.scan || {}; if (s.open_ports && s.open_ports.length) hh+=r('Portas abertas', s.open_ports.length); if (s.hostname) hh+=r('Hostname', s.hostname); if (s.ssh_banner) hh+=r('SSH Banner', s.ssh_banner); if (s.http_server) hh+=r('HTTP Server', s.http_server); if (s.http_title) hh+=r('HTTP Title', s.http_title); if (s.smtp_banner) hh+=r('SMTP Banner', s.smtp_banner); if (s.tls_subject) hh+=r('TLS Subject', s.tls_subject); if (s.tls_issuer) hh+=r('TLS Issuer', s.tls_issuer); if (s.tls_valid_from && s.tls_valid_to) hh+=r('TLS Validade', s.tls_valid_from+' → '+s.tls_valid_to); if (s.favicon_hash) hh+=r('Favicon Hash', s.favicon_hash); if (s.protocols_detected) { var p=Object.entries(s.protocols_detected).filter(function(e){return e[1];}).map(function(e){return e[0];}).join(', '); if(p) hh+=r('Protocolos', p); } if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado de scan.</p>'; } else if (id === 'inference') { var i = m.inference || {}; if (i.vendor) hh+=r('Fabricante inferido', i.vendor); if (i.product) hh+=r('Produto inferido', i.product); if (i.service) hh+=r('Serviço inferido', i.service); if (i.category) hh+=r('Categoria', i.category); if (i.evidence) hh+=r('Evidências', i.evidence.length); if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado de inferência.</p>'; } else if (id === 'snmp') { var sn = m.snmp || {}; if (sn.sysDescr) hh+=r('sysDescr', sn.sysDescr); if (sn.sysName) hh+=r('sysName', sn.sysName); if (sn.sysUptime) hh+=r('sysUptime', sn.sysUptime); if (sn.sysObjectID) hh+=r('sysObjectID', sn.sysObjectID); if (sn.sysLocation) hh+=r('sysLocation', sn.sysLocation); if (sn.sysContact) hh+=r('sysContact', sn.sysContact); if (sn.interfaces && sn.interfaces.length) hh+=r('Interfaces SNMP', sn.interfaces.length+' detectadas'); if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado SNMP.</p>'; } else if (id === 'banners') { var b = (m.scan && m.scan.port_banners) ? m.scan.port_banners : {}; var keys = Object.keys(b); if (keys.length > 0) { hh+='<table><thead><tr><th>Porta</th><th>Banner</th></tr></thead><tbody>'; keys.slice(0,10).forEach(function(k){ hh+='<tr><td><strong>'+k+'</strong></td><td style="font-size:.75rem;max-width:400px;word-break:break-all">'+(b[k]||'—')+'</td></tr>'; }); hh+='</tbody></table>'; } else hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum banner detectado.</p>'; } else if (id === 'json') { hh = JSON.stringify(m, null, 2); } content.innerHTML = hh; }
+function load(){
+  fetch('/observe/api/assets/'+ASSET_ID,{headers:{'Accept':'application/json'}})
+    .then(r=>r.ok?r.json():Promise.reject('HTTP '+r.status))
+    .then(d=>render(d.asset,d.services,d.incidents||[],d.changes||[],d.interfaces||[]))
+    .catch(e=>document.getElementById('content').innerHTML='<div class="error">'+e+'</div>');
+}
+function badge(s){
+  const m={approved:'approved',monitored:'monitored',discovered:'discovered',ignored:'ignored',quarantined:'quarantined'};
+  return '<span class="badge badge-'+(m[s]||'ignored')+'">'+(s||'?')+'</span>';
+}
+function render(a,svc,inc,chg,ifaces){
+  const m=a.metadata||{};
+  const sysD=m.sysDescr||m.snmp_sysDescr||'';
+  const os=a.os_hint||m.os||m.snmp_os||'—';
+  const v=a.vendor||m.vendor||'—';
+  const p=a.product||m.product||'—';
+  const up=m.snmp_sysUpTime||m.sysUptime||'—';
+  const dns=a.hostname||m.dns_reverse||m.hostname||'—';
+  const ip=a.primary_ip||m.ip||'—';
+  const fs=a.first_seen_at?new Date(a.first_seen_at).toLocaleString('pt-BR'):'—';
+  const ls=a.last_seen_at?new Date(a.last_seen_at).toLocaleString('pt-BR'):'—';
+  let h='';
+  h+='<h1>'+(a.display_name||a.asset_name||'Ativo')+'</h1>';
+  h+='<div class="subtitle">'+a.asset_type+' · '+os+' · '+badge(a.lifecycle_state)+'</div>';
+  h+='<div class="grid">';
+  h+='<div class="card"><div class="card-title">Sistema</div>';
+  h+=r('Nome',a.asset_name);h+=r('Display Name',a.display_name||'—');h+=r('IP',ip);
+  h+=r('DNS Reverso',dns);h+=r('Tipo',a.asset_type);h+=r('Fabricante',v);h+=r('Produto',p);
+  h+=r('Sistema Operacional',os);h+=r('Confiança',(a.confidence*100).toFixed(0)+'%');
+  if(sysD)h+=r('sysDescr',sysD);
+  h+='</div>';
+  h+='<div class="card"><div class="card-title">Status</div>';
+  h+=r('Estado',badge(a.lifecycle_state));h+=r('Criticalidade',a.criticality);
+  h+=r('Primeira vez visto',fs);h+=r('Última vez visto',ls);
+  if(up!=='—')h+=r('Uptime SNMP',up);
+  h+='</div></div>';h+='<div class="card" style="margin-top:1.5rem"><div class="card-title">Serviços ('+svc.length+')</div>';
+  // Incidents / AI
+  if(inc.length>0){
+    h+='<div class="card" style="margin-top:1.5rem"><div class="card-title">Incidentes & IA ('+inc.length+')</div>';
+    h+='<table><thead><tr><th>Incidente</th><th>Gravidade</th><th>Status</th><th>Resumo IA</th></tr></thead><tbody>';
+    inc.forEach(i=>{
+      const sevMap={critical:'🔴',warning:'🟡',info:'🔵',error:'🔴'};
+      const sev=sevMap[i.severity]||'⚪';
+      h+='<tr><td><strong>'+i.title+'</strong></td><td>'+sev+' '+i.severity+'</td><td>'+i.status+'</td><td style="font-size:.8rem">'+(i.ai_summary||'—')+'</td></tr>';
+      if(i.ai_suggestion) h+='<tr><td colspan="4" style="font-size:.75rem;color:var(--accent)">💡 '+i.ai_suggestion+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+  }
+  // Asset Changes
+  if(chg.length>0){
+    h+='<div class="card" style="margin-top:1.5rem"><div class="card-title">Histórico de Alterações ('+chg.length+')</div>';
+    h+='<table><thead><tr><th>Tipo</th><th>Campo</th><th>De</th><th>Para</th><th>Data</th></tr></thead><tbody>';
+    chg.slice(0,15).forEach(c=>{
+      h+='<tr><td>'+c.change_type+'</td><td>'+(c.field_name||'—')+'</td><td style="font-size:.75rem">'+(c.old_value||'—')+'</td><td style="font-size:.75rem">'+(c.new_value||'—')+'</td><td style="font-size:.7rem">'+new Date(c.changed_at).toLocaleString('pt-BR')+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+  }
+  // Interfaces
+  if(ifaces.length>0){
+    h+='<div class="card" style="margin-top:1.5rem"><div class="card-title">Interfaces de Rede ('+ifaces.length+')</div>';
+    h+='<table><thead><tr><th>Interface</th><th>Tipo</th><th>MAC</th><th>IPs</th><th>Velocidade</th><th>Status</th></tr></thead><tbody>';
+    ifaces.forEach(ifc=>{
+      h+='<tr><td><strong>'+ifc.iface_name+'</strong></td><td>'+(ifc.iface_type||'ethernet')+'</td><td style="font-size:.75rem">'+(ifc.mac_address||'—')+'</td><td style="font-size:.75rem">'+(ifc.ip_addresses||'—')+'</td><td>'+(ifc.speed_mbps||'—')+'</td><td>'+(ifc.status||'—')+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+  }
+  if(svc.length>0){
+    h+='<table><thead><tr><th>Serviço</th><th>Proto</th><th>Porta</th><th>Status</th><th>Banner</th><th>Último scan</th></tr></thead><tbody>';
+    svc.forEach(s=>{
+      const b=s.banner?s.banner.substring(0,120):(s.fingerprint&&s.fingerprint.banner)?s.fingerprint.banner.substring(0,120):'—';
+      const lss=s.last_seen_at?new Date(s.last_seen_at).toLocaleString('pt-BR'):'—';
+      h+='<tr><td><strong>'+(s.display_name||s.service_name||'?')+'</strong></td><td>'+(s.protocol||'tcp')+'</td><td>'+s.port+'</td><td class="status-'+s.status+'">'+s.status+'</td><td style="font-size:.75rem;max-width:300px;overflow:hidden;text-overflow:ellipsis">'+b+'</td><td style="font-size:.75rem">'+lss+'</td></tr>';
+    });
+    h+='</tbody></table>';
+  }else{h+='<p style="color:var(--muted);padding:1rem">Nenhum serviço detectado.</p>';}
+  h+='</div>';
+// Lazy metadata sections - collapsed by default, render on click
+  h+='<div class="card" style="margin-top:1.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="scan""><div class="card-title">🔍 Scan ▸</div><div class="meta-content" id="mc-scan" style="display:none"></div></div>';
+  h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="inference""><div class="card-title">🧠 Inferência ▸</div><div class="meta-content" id="mc-inference" style="display:none"></div></div>';
+  h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="snmp""><div class="card-title">📡 SNMP ▸</div><div class="meta-content" id="mc-snmp" style="display:none"></div></div>';
+  if (m.scan && m.scan.port_banners) h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="banners""><div class="card-title">🏷 Banners de Porta ▸</div><div class="meta-content" id="mc-banners" style="display:none"></div></div>';
+  h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="json""><div class="card-title">📋 JSON Completo ▸</div><pre class="meta-json" id="mc-json" style="display:none"></pre></div>';
+  window._assetMeta = m;
+  window._r = r;
+  document.getElementById('content').innerHTML=h;
+}
+function r(l,v){return '<div class="info-row"><span class="info-label">'+l+'</span><span class="info-value">'+v+'</span></div>';}
+load();
+</script>
+</body>
+</html>`;
 // ── Sistema de Configuração Abrangente (todos os parâmetros visíveis) ──────
 
 const SYSTEM_SETTINGS_DEFAULTS = {
@@ -923,10 +1088,16 @@ const SYSTEM_SETTINGS_DEFAULTS = {
     passive_enabled: process.env.DISCOVERY_PASSIVE_LISTENERS_ENABLED !== 'false',
     port_change_detection: process.env.DISCOVERY_PORT_CHANGE_DETECTION !== 'false',
     port_disappeared_grace_scans: parseInt(process.env.DISCOVERY_PORT_DISAPPEARED_GRACE || '2', 10),
+    scan_parallel: parseInt(process.env.DISCOVERY_SCAN_PARALLEL || '20', 10),
+    extra_ports: (process.env.DISCOVERY_EXTRA_PORTS || ''),
   },
   agents: {
     offline_threshold_minutes: Math.round(parseInt(process.env.AGENT_OFFLINE_THRESHOLD_MS || '300000', 10) / 60000),
     offline_check_enabled: process.env.AGENT_OFFLINE_CHECK_ENABLED !== 'false',
+    check_interval_seconds: parseInt(process.env.CHECK_INTERVAL_MS || '60000', 10) / 1000,
+    disk_warn_percent: parseInt(process.env.DISK_WARN_PERCENT || '80', 10),
+    docker_projects: (process.env.OBSERVE_DOCKER_PROJECTS || ''),
+    docker_ignore_containers: (process.env.OBSERVE_DOCKER_IGNORE_CONTAINERS || ''),
   },
   certs: {
     expiry_warning_days: 30,
@@ -963,10 +1134,16 @@ function loadSystemSettings() {
       passive_enabled: process.env.DISCOVERY_PASSIVE_LISTENERS_ENABLED !== 'false',
       port_change_detection: process.env.DISCOVERY_PORT_CHANGE_DETECTION !== 'false',
       port_disappeared_grace_scans: parseInt(process.env.DISCOVERY_PORT_DISAPPEARED_GRACE || '2', 10),
+      scan_parallel: parseInt(process.env.DISCOVERY_SCAN_PARALLEL || '20', 10),
+      extra_ports: (process.env.DISCOVERY_EXTRA_PORTS || ''),
     },
     agents: {
       offline_threshold_minutes: Math.round(parseInt(process.env.AGENT_OFFLINE_THRESHOLD_MS || '300000', 10) / 60000),
       offline_check_enabled: process.env.AGENT_OFFLINE_CHECK_ENABLED !== 'false',
+      check_interval_seconds: parseInt(process.env.CHECK_INTERVAL_MS || '60000', 10) / 1000,
+      disk_warn_percent: parseInt(process.env.DISK_WARN_PERCENT || '80', 10),
+      docker_projects: (process.env.OBSERVE_DOCKER_PROJECTS || ''),
+      docker_ignore_containers: (process.env.OBSERVE_DOCKER_IGNORE_CONTAINERS || ''),
     },
     certs: { ..._systemSettings.certs },
     os_defaults: { ..._systemSettings.os_defaults },
@@ -995,7 +1172,7 @@ app.get(`${BASE}/system/settings`, requireAuth, (_req, res) => {
   });
 });
 
-app.post(`${BASE}/system/settings`, requireAuth, requireAdmin, (req, res) => {
+app.post(`${BASE}/system/settings`, requireAuth, requireAdmin, async (req, res) => {
   const body = req.body || {};
 
   // Atualiza apenas os campos enviados
@@ -1004,12 +1181,32 @@ app.post(`${BASE}/system/settings`, requireAuth, requireAdmin, (req, res) => {
       _systemSettings.discovery.port_change_detection = body.discovery.port_change_detection;
     if (typeof body.discovery.port_disappeared_grace_scans === 'number')
       _systemSettings.discovery.port_disappeared_grace_scans = body.discovery.port_disappeared_grace_scans;
+    if (typeof body.discovery.arp_enabled === 'boolean')
+      _systemSettings.discovery.arp_enabled = body.discovery.arp_enabled;
+    if (typeof body.discovery.docker_enabled === 'boolean')
+      _systemSettings.discovery.docker_enabled = body.discovery.docker_enabled;
+    if (typeof body.discovery.cloud_enabled === 'boolean')
+      _systemSettings.discovery.cloud_enabled = body.discovery.cloud_enabled;
+    if (typeof body.discovery.passive_enabled === 'boolean')
+      _systemSettings.discovery.passive_enabled = body.discovery.passive_enabled;
+    if (typeof body.discovery.scan_parallel === 'number')
+      _systemSettings.discovery.scan_parallel = body.discovery.scan_parallel;
+    if (typeof body.discovery.extra_ports === 'string')
+      _systemSettings.discovery.extra_ports = body.discovery.extra_ports;
   }
   if (body.agents) {
     if (typeof body.agents.offline_check_enabled === 'boolean')
       _systemSettings.agents.offline_check_enabled = body.agents.offline_check_enabled;
     if (typeof body.agents.offline_threshold_minutes === 'number')
       _systemSettings.agents.offline_threshold_minutes = body.agents.offline_threshold_minutes;
+    if (typeof body.agents.check_interval_seconds === 'number')
+      _systemSettings.agents.check_interval_seconds = body.agents.check_interval_seconds;
+    if (typeof body.agents.disk_warn_percent === 'number')
+      _systemSettings.agents.disk_warn_percent = body.agents.disk_warn_percent;
+    if (typeof body.agents.docker_projects === 'string')
+      _systemSettings.agents.docker_projects = body.agents.docker_projects;
+    if (typeof body.agents.docker_ignore_containers === 'string')
+      _systemSettings.agents.docker_ignore_containers = body.agents.docker_ignore_containers;
   }
   if (body.certs) {
     if (typeof body.certs.expiry_warning_days === 'number')
@@ -1063,6 +1260,83 @@ app.get(`${BASE}/system/status`, requireAuth, async (_req, res) => {
     });
   } catch (e) {
     res.json({ error: e.message });
+  }
+});
+
+// ─── Asset Detail ────────────────────────────────────────────────────────
+app.get(`${BASE}/assets/:id`, requireAuth, async (req, res) => {
+  try {
+    const pool = require('./db').createDbClient(process.env);
+    const asset = await pool.query(
+      `SELECT id, asset_name, display_name, asset_type, vendor, product, os_hint, 
+              primary_ip, hostname, lifecycle_state, criticality, confidence,
+              metadata, first_seen_at, last_seen_at, created_at, updated_at
+       FROM observe_assets
+       WHERE id = $1::uuid AND tenant_id = 'default'`,
+      [req.params.id]
+    ).catch(() => ({ rows: [] }));
+    if (!asset.rows.length) { await pool.end().catch(()=>{}); return res.status(404).json({ error: 'Ativo não encontrado' }); }
+    
+    const [services, incidents, changes, interfaces] = await Promise.all([
+      pool.query(
+        `SELECT service_name, protocol, port, status, fingerprint, first_seen_at, last_seen_at
+         FROM observe_asset_services
+         WHERE asset_id = $1::uuid AND tenant_id = 'default'
+         ORDER BY port`,
+        [req.params.id]
+      ).catch(() => ({ rows: [] })),
+      pool.query(
+        `SELECT i.id, i.title, i.severity, i.status, i.ai_summary, i.ai_suggestion, i.created_at
+         FROM observe_incidents i
+         WHERE i.host_id = $1::uuid
+         ORDER BY i.created_at DESC LIMIT 20`,
+        [req.params.id]
+      ).catch(() => ({ rows: [] })),
+      pool.query(
+        `SELECT change_type, field_name, old_value, new_value, changed_at
+         FROM observe_asset_changes
+         WHERE asset_id = $1::uuid AND tenant_id = 'default'
+         ORDER BY changed_at DESC LIMIT 30`,
+        [req.params.id]
+      ).catch(() => ({ rows: [] })),
+      pool.query(
+        `SELECT iface_name, iface_type, mac_address, ip_addresses, speed_mbps, status
+         FROM observe_asset_interfaces
+         WHERE asset_id = $1::uuid AND tenant_id = 'default'
+         ORDER BY iface_name`,
+        [req.params.id]
+      ).catch(() => ({ rows: [] }))
+    ]);
+    await pool.end().catch(() => {});
+    
+    // Enrich services with IANA port names + fingerprint labels
+    const IANA = {20:'FTP-data',21:'FTP',22:'SSH',23:'Telnet',25:'SMTP',53:'DNS',67:'DHCP',68:'DHCP',80:'HTTP',110:'POP3',123:'NTP',143:'IMAP',161:'SNMP',162:'SNMP-trap',389:'LDAP',443:'HTTPS',445:'SMB',465:'SMTPS',514:'Syslog',587:'SMTP-submission',636:'LDAPS',873:'Rsync',993:'IMAPS',995:'POP3S',1433:'MSSQL',1521:'Oracle',2049:'NFS',2181:'ZooKeeper',2375:'Docker',2376:'Docker-TLS',3000:'Grafana/Node',3306:'MySQL',3389:'RDP',4000:'Jupyter/API',4369:'Erlang',5000:'API/Registry',5038:'Asterisk-AMI',5044:'Logstash-Beats',5353:'mDNS',5432:'PostgreSQL',5433:'PostgreSQL',5555:'API/Dev',5665:'Icinga2-API',5672:'RabbitMQ',6379:'Redis',6443:'K8s-API',8000:'HTTP-alt',8080:'HTTP-proxy',8443:'HTTPS-alt',9000:'MinIO/API',9090:'Prometheus',9092:'Kafka',9100:'NodeExporter',9200:'Elasticsearch',9300:'Elasticsearch-node',10050:'Zabbix',11211:'Memcached',27017:'MongoDB'};
+    const enrichedServices = (services.rows || []).map(s => {
+      let name = s.service_name;
+      let banner = '';
+      let productHint = '';
+      if (s.fingerprint && typeof s.fingerprint === 'object') {
+        const f = s.fingerprint;
+        if (f.product_hint) productHint = f.product_hint;
+        if (f.banner) banner = f.banner;
+        if (f.technology && !productHint) productHint = f.technology;
+      }
+      // Resolve name: fingerprint > IANA > existing
+      if (productHint && name.startsWith('port-')) name = productHint;
+      else if (name.startsWith('port-') && IANA[s.port]) name = IANA[s.port];
+      else if (name.startsWith('port-')) name = s.protocol + '/' + s.port;
+      return { ...s, display_name: name, banner, product_hint: productHint };
+    });
+    
+    res.json({ 
+      asset: asset.rows[0], 
+      services: enrichedServices,
+      incidents: incidents.rows || [],
+      changes: changes.rows || [],
+      interfaces: interfaces.rows || []
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -2137,6 +2411,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
     <button class="tab-btn" onclick="switchTab('agents')">📡 Agentes</button>
     <button class="tab-btn" onclick="switchTab('os')">💻 SO</button>
     <button class="tab-btn" onclick="switchTab('certs')">🔒 Certs</button>
+    <button class="tab-btn" onclick="switchTab('monitoring')">📊 Monitoramento</button>
   </div>
 
   <div class="settings-layout">
@@ -2175,7 +2450,7 @@ const AUTO_LABELS = { openai:'gpt-4o-mini', anthropic:'claude-haiku-4-5-20251001
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   if (attrs) Object.entries(attrs).forEach(([k,v]) => { if (k==='className') el.className=v; else el.setAttribute(k,v); });
-  children.forEach(c => { if (typeof c==='string') el.appendChild(document.createTextNode(c)); else if (c) el.appendChild(c); });
+  (function walk(arr){ arr.forEach(c => { if (typeof c==='string') el.appendChild(document.createTextNode(c)); else if (c instanceof Node) el.appendChild(c); else if (Array.isArray(c)) walk(c); }); })(children);
   return el;
 }
 
@@ -2220,6 +2495,12 @@ function readCurrentSettings(){
     discovery: {
       port_change_detection: document.getElementById('tog-port_change')?.checked,
       port_disappeared_grace_scans: parseInt(document.getElementById('sld-grace')?.value||2),
+      arp_enabled: document.getElementById('tog-discovery_arp')?.checked,
+      docker_enabled: document.getElementById('tog-discovery_docker')?.checked,
+      cloud_enabled: document.getElementById('tog-discovery_cloud')?.checked,
+      passive_enabled: document.getElementById('tog-discovery_passive')?.checked,
+      scan_parallel: parseInt(document.getElementById('sld-scan_parallel')?.value||20),
+      extra_ports: document.getElementById('txt-extra_ports')?.value || '',
     },
     agents: {
       offline_check_enabled: document.getElementById('tog-agent_offline')?.checked,
@@ -2245,13 +2526,14 @@ function showFeedback(msg,ok){
 
 function switchTab(tab){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active',b.textContent.includes(
-    tab==='discovery'?'Descoberta':tab==='ai'?'IA':tab==='agents'?'Agentes':tab==='os'?'SO':'Certs')));
+    tab==='discovery'?'Descoberta':tab==='ai'?'IA':tab==='agents'?'Agentes':tab==='os'?'SO':tab==='certs'?'Certs':'Monitoramento')));
   const p=document.getElementById('settings-panel');
   if(tab==='discovery') renderDiscovery(p);
   else if(tab==='ai') renderAI(p);
   else if(tab==='agents') renderAgents(p);
   else if(tab==='os') renderOS(p);
   else if(tab==='certs') renderCerts(p);
+  else if(tab==='monitoring') renderMonitoring(p);
 }
 
 // ── Discovery Tab ──
@@ -2272,6 +2554,20 @@ function renderDiscovery(el){
   document.getElementById('tog-port_change').checked=true;
   document.getElementById('sld-scan_interval').value=60;document.getElementById('sldv-scan_interval').textContent='60 min';
   document.getElementById('sld-grace').value=2;document.getElementById('sldv-grace').textContent='2 scans';
+  el.appendChild(h('div',{className:'field'},[h('div',{},toggle('snmp_discovery')),h('div',{className:'toggle-desc'},'Ativar descoberta SNMP (sysDescr, OS, interfaces)')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{},'SNMP Community'),h('input',{type:'text',id:'txt-snmp_community',value:'public',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',onchange:'markDirty()'})]));
+  document.getElementById('tog-snmp_discovery').checked=false;
+  el.appendChild(h('div',{className:'field'},[toggle('discovery_arp'),h('div',{className:'toggle-desc'},'Descoberta via ARP (rede local)')]));
+  el.appendChild(h('div',{className:'field'},[toggle('discovery_docker'),h('div',{className:'toggle-desc'},'Descoberta de contêineres Docker')]));
+  el.appendChild(h('div',{className:'field'},[toggle('discovery_cloud'),h('div',{className:'toggle-desc'},'Descoberta de recursos Cloud (AWS)')]));
+  el.appendChild(h('div',{className:'field'},[toggle('discovery_passive'),h('div',{className:'toggle-desc'},'Listeners passivos (syslog, netflow, traps)')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{},'Scans paralelos'),slider('scan_parallel',1,100,1,20,'')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{},'Portas extras (separadas por vírgula)'),h('input',{type:'text',id:'txt-extra_ports',value:'',placeholder:'Ex: 8080,8443,9090',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',onchange:'markDirty()'})]));
+  document.getElementById('tog-discovery_arp').checked=true;
+  document.getElementById('tog-discovery_docker').checked=true;
+  document.getElementById('tog-discovery_cloud').checked=false;
+  document.getElementById('tog-discovery_passive').checked=true;
+  document.getElementById('sld-scan_parallel').value=20;document.getElementById('sldv-scan_parallel').textContent='20';
 }
 // ── AI Tab ──
 function renderAI(el){
@@ -2318,6 +2614,12 @@ function renderAgents(el){
   el.appendChild(h('div',{className:'field'},[h('label',{},'Tempo para considerar offline'),slider('agent_timeout',1,60,1,5,' min')]));
   document.getElementById('tog-agent_offline').checked=true;
   document.getElementById('sld-agent_timeout').value=5;document.getElementById('sldv-agent_timeout').textContent='5 min';
+  el.appendChild(h('div',{className:'field'},[h('label',{},'Intervalo de check do agente'),slider('agent_check_interval',10,600,10,60,' seg')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{},'Alerta de disco (%)'),slider('agent_disk_warn',50,99,1,80,'%')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{},'Projetos Docker monitorados'),h('select',{id:'sel-docker_projects',multiple:'',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:100px',onchange:'markDirty()'},[h('option',{value:'infra'},'infra'),h('option',{value:'infra-httpd'},'infra-httpd'),h('option',{value:'infra-mail'},'infra-mail'),h('option',{value:'dns-consolidated'},'dns-consolidated'),h('option',{value:'edge-sni'},'edge-sni'),h('option',{value:'r-observe'},'r-observe')])]));
+  el.appendChild(h('div',{className:'field'},[h('label',{},'Contêineres ignorados'),h('select',{id:'sel-docker_ignore',multiple:'',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:100px',onchange:'markDirty()'},[h('option',{value:'results-mail-certs-bootstrap'},'results-mail-certs-bootstrap'),h('option',{value:'results-mail-certs'},'results-mail-certs'),h('option',{value:'portainer'},'portainer'),h('option',{value:'librenms'},'librenms')])]));
+  document.getElementById('sld-agent_check_interval').value=60;document.getElementById('sldv-agent_check_interval').textContent='60 seg';
+  document.getElementById('sld-agent_disk_warn').value=80;document.getElementById('sldv-agent_disk_warn').textContent='80%';
 }
 // ── OS Tab ──
 function renderOS(el){
@@ -2330,6 +2632,15 @@ function renderOS(el){
   document.getElementById('tog-os_win').checked=true;
   document.getElementById('tog-os_snmp').checked=true;
 }
+// ── Monitoring Tab ──
+function renderMonitoring(el){
+  el.innerHTML='';
+  el.appendChild(h('div',{className:'panel-title'},'Monitoramento'));
+  el.appendChild(h('div',{className:'field'},[toggle('mon_icinga'),h('div',{className:'toggle-desc'},'Sincronizar hosts com Icinga2')]));
+  el.appendChild(h('div',{className:'field'},[toggle('mon_prometheus'),h('div',{className:'toggle-desc'},'Gerar Prometheus Service Discovery (file_sd)')]));
+  document.getElementById('tog-mon_icinga').checked=true;
+  document.getElementById('tog-mon_prometheus').checked=true;
+}
 // ── Certs Tab ──
 function renderCerts(el){
   el.innerHTML='';
@@ -2341,6 +2652,7 @@ function renderCerts(el){
 }
 
 // ── AI helpers ──
+
 function getHeaders(){return{'Content-Type':'application/json'};}
 function selectAIProvider(p){_aiProvider=p;document.querySelectorAll('.provider-btn').forEach(b=>b.classList.toggle('active',b.dataset.provider===p));renderAI(document.getElementById('settings-panel'));markDirty();}
 function toggleKey(){const e=document.getElementById('api-key');e.type=e.type==='password'?'text':'password';}

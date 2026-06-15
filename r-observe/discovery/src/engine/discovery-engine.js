@@ -17,6 +17,7 @@ const { discoverBluetooth } = require('../scanners/bluetooth');
 const { scanIndustrialHost } = require('../scanners/industrial');
 const { discoverLldpCdp } = require('../scanners/lldp-cdp');
 const { handleAgentReport } = require('../scanners/agents');
+const { nmapServiceScan } = require('../scanners/nmap-sv');
 const { fingerprintAsset } = require('../fingerprint/engine');
 
 // ── Port change detection ─────────────────────────────────────────────────
@@ -105,6 +106,13 @@ async function storeAssetServices(db, asset, scan) {
     // Dependency detection via knowledge base
     const depMatch = allServices.find(s => (s.ports || []).includes(port) && s.dependency_type);
     const dependencyTarget = depMatch ? `${asset.primary_ip}:${port}` : null;
+
+    // ── Per-port fingerprint: banner + KB hints ────────────────────────
+    const portBanner = scan.port_banners?.[port] || null;
+    const portSpecificBanner = port === 22 ? scan.ssh_banner : port === 25 || port === 587 || port === 465 ? scan.smtp_banner : null;
+    const serviceBanner = portBanner || portSpecificBanner || null;
+    const portHint = kb.getPortHints()?.[port] || {};
+
     await db.query(
       `INSERT INTO observe_asset_services
         (id, tenant_id, site_id, edge_id, asset_id, service_key, service_name, protocol, port, status, fingerprint, first_seen_at, last_seen_at)
@@ -117,7 +125,15 @@ async function storeAssetServices(db, asset, scan) {
         `port-${port}`,
         proto,
         port,
-        JSON.stringify({ protocol: proto, port, http_server: scan.http_server || null }),
+        JSON.stringify({
+          protocol: proto,
+          port,
+          http_server: scan.http_server || null,
+          banner: serviceBanner,
+          technology: portHint.technology || null,
+          product_hint: portHint.product || null,
+          category: portHint.category || null,
+        }),
       ]
     );
     services.push({
@@ -128,6 +144,28 @@ async function storeAssetServices(db, asset, scan) {
       dependency_target: dependencyTarget,
     });
   }
+
+  // ── Nmap -sV: fingerprint de versão para todos os serviços ──────────
+  if (scan.open_ports && scan.open_ports.length > 0) {
+    try {
+      const svResults = await nmapServiceScan(asset.primary_ip, scan.open_ports);
+      for (const sv of svResults) {
+        const svcName = sv.version 
+          ? `${sv.service} ${sv.version}`
+          : sv.service;
+        const svcKey = `${sv.protocol}:${sv.port}`;
+        await db.query(
+          `UPDATE observe_asset_services SET
+             service_name = $1,
+             fingerprint = COALESCE(fingerprint, '{}'::jsonb) || $2::jsonb,
+             last_seen_at = NOW()
+           WHERE asset_id = $3 AND service_key = $4`,
+          [svcName, JSON.stringify({ version: sv.version, product: sv.product, nmap_raw: sv.raw }), asset.id, svcKey]
+        ).catch(() => {});
+      }
+    } catch (_) { /* Nmap -sV pode falhar, segue */ }
+  }
+
   return services;
 }
 
@@ -1378,6 +1416,115 @@ async function runDiscovery({ db, redis, input, onProgress }) {
       log('warn', 'Industrial protocol discovery failed', { err: e.message });
     }
     report({ stage: 'industrial', status: 'done' });
+  }
+
+  // ── SNMP Sweep — descobre hosts SNMP-only e coleta sysDescr/OS ─────────
+  const snmpEnabled = input.snmp_enabled !== false 
+    && (policy?.metadata?.snmp_enabled === true || policy?.metadata?.snmp_enabled === 'true' || process.env.DISCOVERY_SNMP_ENABLED === 'true');
+  report({ stage: 'snmp', status: snmpEnabled ? 'running' : 'skipped' });
+  let snmpScanned = 0;
+  if (snmpEnabled) {
+    const community = policy?.metadata?.snmp_community || process.env.SNMP_COMMUNITY || 'public';
+    // Coleta subnets unicas dos targets expandidos
+    const snmpSubnets = new Set();
+    for (const t of expandedTargets) {
+      const parts = String(t.address || '').split('.');
+      if (parts.length === 4) snmpSubnets.add(`${parts[0]}.${parts[1]}.${parts[2]}.0/24`);
+    }
+    // Tambem adiciona subnets de targets CIDR
+    for (const t of targets) {
+      const addr = String(t.address || t || '');
+      if (addr.includes('/')) snmpSubnets.add(addr);
+    }
+
+    for (const cidr of snmpSubnets) {
+      const parts = cidr.split('/')[0].split('.');
+      if (parts.length !== 4) continue;
+      const base = `${parts[0]}.${parts[1]}.${parts[2]}`;
+      const prefixLen = parseInt(cidr.split('/')[1] || '24', 10);
+      // Limitar a /24 para performance
+      if (prefixLen < 24) continue;
+      const start = prefixLen === 32 ? parseInt(parts[3], 10) : 1;
+      const end = prefixLen === 32 ? parseInt(parts[3], 10) : 254;
+
+      // SNMP sweep em lotes de 10 IPs
+      for (let i = start; i <= end; i += 10) {
+        const batch = [];
+        for (let j = i; j < i + 10 && j <= end; j++) {
+          const ip = `${base}.${j}`;
+          // Pula se ja existe no assets
+          if (assets.some(a => a.primary_ip === ip)) continue;
+          batch.push(ip);
+        }
+        if (batch.length === 0) continue;
+
+        const results = await Promise.allSettled(
+          batch.map(ip => snmpDeepDiscover(ip, { community }))
+        );
+
+        for (let k = 0; k < batch.length; k++) {
+          const ip = batch[k];
+          const result = results[k];
+          if (result.status !== 'fulfilled' || !result.value?.reachable) continue;
+          snmpScanned++;
+
+          const snmp = result.value;
+          const sysDescr = snmp.sysDescr || '';
+          const osClass = snmp.classification || {};
+          const osHint = osClass.os || (sysDescr.includes('Linux') ? 'Linux' : sysDescr.includes('Windows') ? 'Windows' : null);
+
+          const snmpRow = {
+            ...tenant,
+            asset_key: `ip:${ip}`,
+            asset_name: snmp.sysName || `snmp-${ip.replace(/\./g, '-')}`,
+            display_name: snmp.sysName || ip,
+            primary_ip: ip,
+            hostname: snmp.sysName || null,
+            asset_type: 'host',
+            vendor: osClass.vendor || null,
+            product: osClass.os || osHint || null,
+            os_hint: osHint,
+            confidence: 0.7,
+            criticality: 'medium',
+            metadata: { snmp: { sysDescr, sysObjectID: snmp.sysObjectID, sysName: snmp.sysName, sysContact: snmp.sysContact, sysLocation: snmp.sysLocation, interfaces: (snmp.interfaces || []).length, os_class: osClass }, lifecycle: 'discovered' },
+          };
+
+          const saved = await upsertAsset(db, snmpRow);
+          assets.push({ ...saved, tenant_id: tenant.tenant_id, site_id: tenant.site_id, edge_id: tenant.edge_id, asset_name: snmpRow.asset_name, primary_ip: ip, services: [] });
+          await saveFindings(db, run.id, tenant, { type: 'snmp_host_discovered', severity: 'info', source: 'snmp-sweep', asset_key: `ip:${ip}`, payload: { ip, sysDescr, sysName: snmp.sysName, osHint } });
+        }
+      }
+    }
+    report({ stage: 'snmp', status: 'done', snmp_scanned: snmpScanned });
+  }
+
+  // ── Enriquecer assets existentes com dados SNMP ────────────────────────
+  for (const asset of assets) {
+    if (!asset.primary_ip || asset.metadata?.snmp) continue;
+    // Pula Docker bridge IPs que nao estao em 10.10.2.x
+    if (!asset.primary_ip.startsWith('10.10.2.')) continue;
+    if (asset.os_hint) continue;
+
+    try {
+      const community = process.env.SNMP_COMMUNITY || 'public';
+      const snmp = await snmpDeepDiscover(asset.primary_ip, { community });
+      if (snmp?.reachable && snmp?.sysDescr) {
+        const sysDescr = snmp.sysDescr || '';
+        const osClass = snmp.classification || {};
+        const osHint = osClass.os || (sysDescr.includes('Linux') ? 'Linux' : sysDescr.includes('Windows') ? 'Windows' : null);
+
+        await db.query(
+          `UPDATE observe_assets SET os_hint = COALESCE($2, os_hint), vendor = COALESCE($3, vendor), product = COALESCE($4, product), metadata = metadata || '{}'::jsonb, updated_at = NOW() WHERE id = $1`,
+          [asset.id, osHint, osClass.vendor || null, osClass.os || osHint || null]
+        );
+        asset.os_hint = osHint || asset.os_hint;
+        asset.vendor = osClass.vendor || asset.vendor;
+        asset.product = osClass.os || osHint || asset.product;
+        asset.metadata = { ...(asset.metadata || {}), snmp: { sysDescr, sysObjectID: snmp.system.sysObjectID, os_class: osClass } };
+
+        await saveFindings(db, run.id, tenant, { type: 'snmp_enriched', severity: 'info', source: 'snmp-sweep', asset_key: asset.asset_key, payload: { ip: asset.primary_ip, sysDescr, osHint } });
+      }
+    } catch (_) { /* SNMP pode falhar, segue */ }
   }
 
   report({ stage: 'topology', status: 'running' });

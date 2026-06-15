@@ -102,8 +102,8 @@ services:
   r-observe-api:
     <<: *common
     build:
-      context: ./r-observe
-      dockerfile: api/Dockerfile
+      context: ..
+      dockerfile: r-observe/r-observe/api/Dockerfile
     container_name: r-observe-api
     profiles: [observe-core]
     depends_on:

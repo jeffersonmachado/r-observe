@@ -215,6 +215,16 @@ function normalizeNmapScan(scan, normalizedArp) {
     });
   }
 
+  // ── Banners e fingerprints (HTTP, SSH, SNMP, TLS) ──────────────────────
+  base.http_server   = scan.http_server   || base.http_server   || null;
+  base.http_title    = scan.http_title    || base.http_title    || null;
+  base.ssh_banner    = scan.ssh_banner    || base.ssh_banner    || null;
+  base.smtp_banner   = scan.smtp_banner   || base.smtp_banner   || null;
+  base.snmp_sysdescr = scan.snmp_sysdescr || base.snmp_sysdescr || null;
+  base.tls_subject   = scan.tls_subject   || base.tls_subject   || null;
+  base.tls_issuer    = scan.tls_issuer    || base.tls_issuer    || null;
+  base.os_hint       = scan.os_hint       || base.os_hint       || null;
+
   // NÃO criar evidências individuais de porta aqui — o inference engine
   // faz isso em extractPortEvidence com os PORT_HINTS adequados.
   // Apenas registrar uma evidência agregada de que houve port scan.

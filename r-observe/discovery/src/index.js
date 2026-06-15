@@ -19,9 +19,10 @@ const { toPromSdGroups } = require('./exporters/prometheus-sd');
 const { emitEvent } = require('./queues/events');
 const { upsertAsset } = require('./engine/repository');
 const { createDbClient } = require('./db');
-const { requireJwt } = require('./jwt');
+const { requireJwt, signInternalToken, verifyInternalToken } = require('./jwt');
 
 const { createLifecycle } = require('../shared/lifecycle');
+const { audit, logAudit } = require('./audit');
 
 const PORT = parseInt(process.env.PORT || '3010', 10);
 const SCAN_QUEUE_ENABLED = process.env.DISCOVERY_SCAN_QUEUE_ENABLED !== 'false';
@@ -88,7 +89,31 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 120 }));
 
-const requireAuth = requireJwt;
+const requireAuth = (req, res, next) => {
+  const provided = req.headers['x-internal-token'] ||
+    (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (provided) {
+    const payload = verifyInternalToken(provided);
+    if (payload) {
+      req.auth = { type: 'jwt', user: payload.sub || 'internal', role: payload.role || 'admin' };
+      return next();
+    }
+  }
+  return res.status(401).json({ error: 'Unauthorized' });
+};
+
+const requireAuthOpt = (req, _res, next) => {
+  const provided = req.headers['x-internal-token'] ||
+    (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (provided) {
+    const payload = verifyInternalToken(provided);
+    if (payload) req.auth = { type: 'jwt', user: payload.sub || 'internal', role: payload.role || 'admin' };
+  }
+  next();
+};
+
+// ── Audit middleware global: extrai actor/ip ──────────────────────────────
+app.use(audit);
 
 function parseScope(input = {}) {
   return {
@@ -133,7 +158,7 @@ app.get('/metrics', async (_req, res) => {
   res.end(await register.metrics());
 });
 
-app.get('/api/discovery/progress', requireAuth, (_req, res) => {
+app.get('/api/discovery/progress', requireAuthOpt, (_req, res) => {
   if (!_progress) return res.json({ active: false });
   const elapsed_ms = Date.now() - new Date(_progress.started_at).getTime();
   res.json({ ..._progress, elapsed_ms });
@@ -156,10 +181,11 @@ app.post('/api/discovery/scan', requireAuth, asyncRoute(async (req, res) => {
   const onProgress = makeOnProgress();
   const out = await runDiscovery({ db, redis, input: payload, onProgress });
   runsTotal.inc({ status: 'completed' });
+  await logAudit(db, req, { resource_id: out.run_id, summary_suffix: out.summary ? ` | assets=${out.summary.discovered_assets} edges=${out.summary.topology_edges}` : '' });
   res.status(202).json({ ...out, queued: false });
 }));
 
-app.get('/api/discovery/runs', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/discovery/runs', requireAuthOpt, asyncRoute(async (req, res) => {
   const scope = parseScope(req.query);
   const r = await db.query(
     `SELECT * FROM observe_discovery_runs WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY started_at DESC LIMIT 100`,
@@ -168,7 +194,7 @@ app.get('/api/discovery/runs', requireAuth, asyncRoute(async (req, res) => {
   res.json({ runs: r.rows, total: r.rowCount });
 }));
 
-app.get('/api/discovery/assets', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/discovery/assets', requireAuthOpt, asyncRoute(async (req, res) => {
   const scope = parseScope(req.query);
   const r = await db.query(
     `SELECT * FROM observe_assets WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY updated_at DESC LIMIT 500`,
@@ -177,7 +203,7 @@ app.get('/api/discovery/assets', requireAuth, asyncRoute(async (req, res) => {
   res.json({ assets: r.rows, total: r.rowCount });
 }));
 
-app.get('/api/discovery/findings', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/discovery/findings', requireAuthOpt, asyncRoute(async (req, res) => {
   const runId = req.query.run_id;
   const scope = parseScope(req.query);
   const sql = runId
@@ -188,7 +214,7 @@ app.get('/api/discovery/findings', requireAuth, asyncRoute(async (req, res) => {
   res.json({ findings: r.rows, total: r.rowCount });
 }));
 
-app.get('/api/discovery/topology', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/discovery/topology', requireAuthOpt, asyncRoute(async (req, res) => {
   const scope = parseScope(req.query);
   const r = await db.query(
     'SELECT * FROM observe_topology_edges WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY observed_at DESC LIMIT 500',
@@ -197,7 +223,7 @@ app.get('/api/discovery/topology', requireAuth, asyncRoute(async (req, res) => {
   res.json({ edges: r.rows, total: r.rowCount });
 }));
 
-app.get('/api/discovery/fingerprints', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/discovery/fingerprints', requireAuthOpt, asyncRoute(async (req, res) => {
   const scope = parseScope(req.query);
   const r = await db.query(
     'SELECT * FROM observe_service_fingerprints WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY observed_at DESC LIMIT 500',
@@ -206,7 +232,7 @@ app.get('/api/discovery/fingerprints', requireAuth, asyncRoute(async (req, res) 
   res.json({ fingerprints: r.rows, total: r.rowCount });
 }));
 
-app.get('/api/discovery/policies', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/discovery/policies', requireAuthOpt, asyncRoute(async (req, res) => {
   const scope = parseScope(req.query);
   const r = await db.query(
     'SELECT * FROM observe_discovery_policies WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY updated_at DESC LIMIT 100',
@@ -235,6 +261,7 @@ app.post('/api/discovery/policies', requireAuth, asyncRoute(async (req, res) => 
       JSON.stringify(b.metadata || {}),
     ]
   );
+  await logAudit(db, req, { resource_id: r.rows[0].id });
   res.status(201).json({ policy: r.rows[0] });
 }));
 
@@ -269,6 +296,7 @@ app.patch('/api/discovery/policies/:id', requireAuth, asyncRoute(async (req, res
     vals
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Política não encontrada' });
+  await logAudit(db, req, { resource_id: id });
   res.json({ policy: r.rows[0] });
 }));
 
@@ -278,11 +306,12 @@ app.delete('/api/discovery/policies/:id', requireAuth, asyncRoute(async (req, re
     [req.params.id]
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Política não encontrada' });
+  await logAudit(db, req, { resource_id: req.params.id, resource_key: r.rows[0].name });
   res.json({ deleted: true, id: req.params.id, name: r.rows[0].name });
 }));
 
 // ── Targets CRUD ──────────────────────────────────────────────────────────────
-app.get('/api/discovery/targets', requireAuth, asyncRoute(async (req, res) => {
+app.get('/api/discovery/targets', requireAuthOpt, asyncRoute(async (req, res) => {
   const scope = parseScope(req.query);
   const r = await db.query(
     `SELECT t.*, p.name AS policy_name FROM observe_discovery_targets t
@@ -315,6 +344,7 @@ app.post('/api/discovery/targets', requireAuth, asyncRoute(async (req, res) => {
       b.label || null, b.enabled !== false, JSON.stringify(b.metadata || {}),
     ]
   );
+  await logAudit(db, req, { resource_id: r.rows[0].id });
   res.status(201).json({ target: r.rows[0] });
 }));
 
@@ -338,6 +368,7 @@ app.patch('/api/discovery/targets/:id', requireAuth, asyncRoute(async (req, res)
     vals
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Target não encontrado' });
+  await logAudit(db, req, { resource_id: id });
   res.json({ target: r.rows[0] });
 }));
 
@@ -347,6 +378,7 @@ app.delete('/api/discovery/targets/:id', requireAuth, asyncRoute(async (req, res
     [req.params.id]
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Target não encontrado' });
+  await logAudit(db, req, { resource_id: req.params.id, resource_key: r.rows[0].address });
   res.json({ deleted: true, id: req.params.id, address: r.rows[0].address });
 }));
 
@@ -374,16 +406,69 @@ app.patch('/api/discovery/assets/:id', requireAuth, asyncRoute(async (req, res) 
     vals
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Ativo não encontrado' });
+  await logAudit(db, req, { resource_id: id });
   res.json({ asset: r.rows[0] });
 }));
 
 app.post('/api/discovery/passive/events', requireAuth, asyncRoute(async (req, res) => {
   const events = Array.isArray(req.body?.events) ? req.body.events : [req.body];
   const accepted = await ingestPassiveEvents(events);
+  await logAudit(db, req, { summary_suffix: `events=${accepted}` });
   res.status(202).json({ accepted });
 }));
 
-app.get('/api/discovery/history', requireAuth, asyncRoute(async (req, res) => {
+// ── Audit log (Enterprise) ────────────────────────────────────────────────────
+app.get('/api/discovery/audit', requireAuthOpt, asyncRoute(async (req, res) => {
+  const scope = parseScope(req.query);
+  const limit = Math.min(Math.max(1, parseInt(req.query.limit || '50', 10)), 500);
+
+  const conditions = [
+    'tenant_id = $1',
+    'site_id = $2',
+    'edge_id = $3',
+  ];
+  const params = [scope.tenant_id, scope.site_id, scope.edge_id];
+
+  if (req.query.action) {
+    params.push(req.query.action);
+    conditions.push(`action = $${params.length}`);
+  }
+  if (req.query.actor) {
+    params.push(req.query.actor);
+    conditions.push(`actor = $${params.length}`);
+  }
+  if (req.query.resource_type) {
+    params.push(req.query.resource_type);
+    conditions.push(`resource_type = $${params.length}`);
+  }
+  if (req.query.resource_id) {
+    params.push(req.query.resource_id);
+    conditions.push(`resource_id = $${params.length}`);
+  }
+
+  const where = conditions.join(' AND ');
+  params.push(limit);
+
+  const r = await db.query(
+    `SELECT id, tenant_id, site_id, edge_id, actor, actor_role, actor_ip, action, resource_type, resource_id, resource_key, summary, created_at
+     FROM observe_audit_log
+     WHERE ${where}
+     ORDER BY created_at DESC
+     LIMIT $${params.length}`,
+    params
+  );
+
+  // Count total (sem LIMIT, mesmos filtros)
+  const countParams = params.slice(0, -1);
+  const cr = await db.query(
+    `SELECT COUNT(*)::int AS total FROM observe_audit_log WHERE ${where}`,
+    countParams
+  );
+
+  res.json({ events: r.rows, total: cr.rows[0]?.total || 0 });
+}));
+
+app.get('/api/discovery/history', requireAuthOpt, asyncRoute(async (req, res) => {
   const assetId = req.query.asset_id;
   if (!assetId) return res.status(400).json({ error: 'asset_id is required' });
   const scope = parseScope(req.query);
@@ -392,6 +477,21 @@ app.get('/api/discovery/history', requireAuth, asyncRoute(async (req, res) => {
     [assetId, scope.tenant_id, scope.site_id, scope.edge_id]
   );
   res.json({ changes: r.rows, total: r.rowCount });
+}));
+
+// ── Services per asset (Enterprise) ─────────────────────────────────────
+app.get('/api/discovery/assets/:id/services', requireAuth, asyncRoute(async (req, res) => {
+  const { id } = req.params;
+  const scope = parseScope(req.query);
+  const r = await db.query(
+    `SELECT s.id, s.service_key, s.service_name, s.protocol, s.port, s.status, s.fingerprint,
+            s.first_seen_at, s.last_seen_at
+     FROM observe_asset_services s
+     WHERE s.asset_id = $1 AND s.tenant_id = $2 AND s.site_id = $3 AND s.edge_id = $4
+     ORDER BY s.port`,
+    [id, scope.tenant_id, scope.site_id, scope.edge_id]
+  );
+  res.json({ services: r.rows, total: r.rowCount });
 }));
 
 app.get('/api/discovery/prometheus/http-sd', asyncRoute(async (req, res) => {
@@ -459,11 +559,13 @@ app.get('/api/discovery/graph/blast-radius', requireAuth, asyncRoute(async (req,
 }));
 
 app.get('/observe/discovery', (_req, res) => {
+  const token = signInternalToken({ sub: 'ui', role: 'admin' });
+  const html = DISCOVERY_UI_HTML.replace('"__TOKEN_PLACEHOLDER__"', JSON.stringify(token));
   res.set('Content-Type', 'text/html; charset=utf-8');
-  res.end(DISCOVERY_UI_HTML);
+  res.end(html);
 });
 
-app.get('/observe/discovery/data/summary', requireAuth, asyncRoute(async (req, res) => {
+app.get('/observe/discovery/data/summary', requireAuthOpt, asyncRoute(async (req, res) => {
   const scope = parseScope(req.query);
   const [runs, assets, findings, fps, edges, policies, targets, services] = await Promise.all([
     db.query('SELECT id, status, started_at, completed_at, summary FROM observe_discovery_runs WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 ORDER BY started_at DESC LIMIT 50', [scope.tenant_id, scope.site_id, scope.edge_id]),
@@ -473,7 +575,7 @@ app.get('/observe/discovery/data/summary', requireAuth, asyncRoute(async (req, r
     db.query('SELECT id, edge_type, from_asset_id, to_asset_ref, observed_at FROM observe_topology_edges WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 ORDER BY observed_at DESC LIMIT 200', [scope.tenant_id, scope.site_id, scope.edge_id]),
     db.query('SELECT * FROM observe_discovery_policies WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 ORDER BY is_default DESC, updated_at DESC', [scope.tenant_id, scope.site_id, scope.edge_id]),
     db.query('SELECT t.*, p.name AS policy_name FROM observe_discovery_targets t LEFT JOIN observe_discovery_policies p ON t.policy_id = p.id WHERE t.tenant_id=$1 AND t.site_id=$2 AND t.edge_id=$3 ORDER BY t.created_at DESC LIMIT 500', [scope.tenant_id, scope.site_id, scope.edge_id]),
-    db.query('SELECT s.id, s.asset_id, s.service_key, s.service_name, s.protocol, s.port, s.status, a.asset_name, a.primary_ip FROM observe_asset_services s JOIN observe_assets a ON s.asset_id = a.id WHERE s.tenant_id=$1 AND s.site_id=$2 AND s.edge_id=$3 ORDER BY a.asset_name, s.port LIMIT 500', [scope.tenant_id, scope.site_id, scope.edge_id]),
+    db.query('SELECT s.id, s.asset_id, s.service_key, s.service_name, s.protocol, s.port, s.status, s.fingerprint, a.asset_name, a.primary_ip FROM observe_asset_services s JOIN observe_assets a ON s.asset_id = a.id WHERE s.tenant_id=$1 AND s.site_id=$2 AND s.edge_id=$3 ORDER BY a.asset_name, s.port LIMIT 500', [scope.tenant_id, scope.site_id, scope.edge_id]),
   ]);
   res.json({
     scope,
@@ -488,7 +590,7 @@ app.get('/observe/discovery/data/summary', requireAuth, asyncRoute(async (req, r
   });
 }));
 
-app.get('/observe/discovery/data/scopes', requireAuth, asyncRoute(async (_req, res) => {
+app.get('/observe/discovery/data/scopes', requireAuthOpt, asyncRoute(async (_req, res) => {
   const list = async (column) => {
     const r = await db.query(
       `WITH scoped AS (
@@ -508,6 +610,249 @@ app.get('/observe/discovery/data/scopes', requireAuth, asyncRoute(async (_req, r
   const [tenants, sites, edges] = await Promise.all([list('tenant_id'), list('site_id'), list('edge_id')]);
   res.json({ tenants, sites, edges });
 }));
+
+// ── SNMP Deep Discovery ─────────────────────────────────────────────────
+
+const { snmpDeepDiscover } = require('./scanners/snmp-deep');
+const { collectMetrics: collectSnmpMetrics } = require('./scanners/snmp-metrics');
+const { discoverRoutingProtocols } = require('./scanners/topology-protocols');
+
+app.post('/api/discovery/snmp/deep/:host', requireAuth, asyncRoute(async (req, res) => {
+  const { host } = req.params;
+  const community = req.body?.community || req.query?.community || 'public';
+  const result = await snmpDeepDiscover(host, { community });
+
+  // Persiste resultado
+  const scope = parseScope(req.body);
+  await db.query(
+    `INSERT INTO observe_snmp_results
+     (tenant_id, site_id, edge_id, asset_id, host, sys_descr, sys_object_id, sys_name, sys_uptime,
+      sys_contact, sys_location, sys_services, classification, interfaces, interface_count,
+      vlans, arp_table, entity, serial_number, model, cpu, memory, storage, wireless,
+      ospf, bgp, vrrp, reachable, auth_failure, errors, collected_at)
+     VALUES ($1,$2,$3,NULL,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,NOW())
+     ON CONFLICT (tenant_id, site_id, edge_id, host)
+     DO UPDATE SET
+       sys_descr=EXCLUDED.sys_descr, sys_object_id=EXCLUDED.sys_object_id,
+       sys_name=EXCLUDED.sys_name, classification=EXCLUDED.classification,
+       interfaces=EXCLUDED.interfaces, interface_count=EXCLUDED.interface_count,
+       vlans=EXCLUDED.vlans, arp_table=EXCLUDED.arp_table, entity=EXCLUDED.entity,
+       serial_number=EXCLUDED.serial_number, model=EXCLUDED.model,
+       cpu=EXCLUDED.cpu, memory=EXCLUDED.memory, storage=EXCLUDED.storage,
+       wireless=EXCLUDED.wireless, ospf=EXCLUDED.ospf, bgp=EXCLUDED.bgp,
+       vrrp=EXCLUDED.vrrp, reachable=EXCLUDED.reachable,
+       auth_failure=EXCLUDED.auth_failure, errors=EXCLUDED.errors,
+       collected_at=NOW()`,
+    [scope.tenant_id, scope.site_id, scope.edge_id, host,
+     result.sysDescr, result.sysObjectID, result.sysName, result.sysUptime,
+     result.sysContact, result.sysLocation, result.sysServices,
+     JSON.stringify(result.classification), JSON.stringify(result.interfaces),
+     result.interface_count, JSON.stringify(result.vlans), JSON.stringify(result.arp_table),
+     JSON.stringify(result.entity), result.serial, result.model,
+     JSON.stringify(result.cpu), JSON.stringify(result.memory), JSON.stringify(result.storage),
+     JSON.stringify(result.wireless), null, null, null,
+     result.reachable, result.auth_failure, JSON.stringify(result.errors)]
+  );
+
+  res.json(result);
+}));
+
+app.get('/api/discovery/snmp/results', requireAuth, asyncRoute(async (req, res) => {
+  const scope = parseScope(req.query);
+  const host = req.query.host;
+  let query = 'SELECT * FROM observe_snmp_results WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3';
+  const params = [scope.tenant_id, scope.site_id, scope.edge_id];
+  if (host) { query += ' AND host=$4'; params.push(host); }
+  query += ' ORDER BY collected_at DESC LIMIT 500';
+  const r = await db.query(query, params);
+  res.json({ results: r.rows, total: r.rowCount });
+}));
+
+app.get('/api/discovery/snmp/results/:host', requireAuth, asyncRoute(async (req, res) => {
+  const { host } = req.params;
+  const scope = parseScope(req.query);
+  const r = await db.query(
+    'SELECT * FROM observe_snmp_results WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND host=$4',
+    [scope.tenant_id, scope.site_id, scope.edge_id, host]
+  );
+  if (!r.rows.length) return res.status(404).json({ error: 'not_found' });
+  res.json(r.rows[0]);
+}));
+
+// ── SNMP Metrics ────────────────────────────────────────────────────────────
+
+app.get('/api/discovery/snmp/metrics/:host', requireAuth, asyncRoute(async (req, res) => {
+  const { host } = req.params;
+  const community = req.query.community || 'public';
+  const format = req.query.format || 'json';
+
+  const metrics = await collectSnmpMetrics(host, { community });
+
+  if (format === 'prometheus') {
+    res.set('Content-Type', 'text/plain; charset=utf-8');
+    return res.send(metrics);
+  }
+
+  // JSON simplificado
+  const lines = metrics.split('\n').filter(l => l && !l.startsWith('#'));
+  const parsed = {};
+  for (const line of lines) {
+    const m = line.match(/^(\w+)\{(.+)\}\s+(.+)$/);
+    if (m) {
+      const labels = Object.fromEntries(m[2].split(',').map(p => p.split('=').map(s => s.replace(/"/g, ''))));
+      const key = `${m[1]}:${labels.if_name || labels.mountpoint || labels.mode || ''}`;
+      parsed[key] = { name: m[1], value: parseFloat(m[3]), labels };
+    }
+  }
+  res.json({ host, metrics: parsed });
+}));
+
+// ── Routing Protocols ───────────────────────────────────────────────────────
+
+app.get('/api/discovery/snmp/routing/:host', requireAuth, asyncRoute(async (req, res) => {
+  const { host } = req.params;
+  const community = req.query.community || 'public';
+  const result = await discoverRoutingProtocols(host, { community });
+
+  // Persiste
+  const scope = parseScope(req.query);
+  await db.query(
+    `INSERT INTO observe_snmp_results
+     (tenant_id, site_id, edge_id, host, ospf, bgp, vrrp, collected_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+     ON CONFLICT (tenant_id, site_id, edge_id, host)
+     DO UPDATE SET ospf=EXCLUDED.ospf, bgp=EXCLUDED.bgp, vrrp=EXCLUDED.vrrp, collected_at=NOW()`,
+    [scope.tenant_id, scope.site_id, scope.edge_id, host,
+     JSON.stringify(result.ospf), JSON.stringify(result.bgp), JSON.stringify(result.vrrp)]
+  );
+
+  res.json(result);
+}));
+
+// ── IPAM ────────────────────────────────────────────────────────────────────
+
+const { IpamRepository, parseSubnet, listSubnetIps, splitSubnet } = require('./engine/ipam');
+
+const ipamRepo = new IpamRepository(db);
+
+app.get('/api/discovery/ipam/subnets', requireAuth, asyncRoute(async (req, res) => {
+  const scope = parseScope(req.query);
+  const subnets = await ipamRepo.getSubnets({ tenant_id: scope.tenant_id, site_id: scope.site_id });
+  res.json({ subnets, total: subnets.length });
+}));
+
+app.post('/api/discovery/ipam/subnets', requireAuth, asyncRoute(async (req, res) => {
+  const { cidr, name, description, parent_id, vlan_id, gateway } = req.body || {};
+  if (!cidr) return res.status(400).json({ error: 'cidr é obrigatório' });
+  const scope = parseScope(req.body);
+  const subnet = await ipamRepo.createSubnet({
+    cidr, name, description, parent_id,
+    site_id: scope.site_id, tenant_id: scope.tenant_id, vlan_id, gateway,
+  });
+  await logAudit(db, req, { resource_id: subnet.id });
+  res.status(201).json({ subnet });
+}));
+
+app.get('/api/discovery/ipam/subnets/:cidr/ips', requireAuth, asyncRoute(async (req, res) => {
+  const { cidr } = req.params;
+  const ips = await ipamRepo.getIpsInSubnet(cidr);
+  const utilization = await ipamRepo.getSubnetUtilization(cidr);
+  res.json({ cidr, ips, utilization });
+}));
+
+app.get('/api/discovery/ipam/subnets/:cidr/info', requireAuth, asyncRoute(async (req, res) => {
+  const { cidr } = req.params;
+  const info = parseSubnet(cidr);
+  res.json(info);
+}));
+
+app.get('/api/discovery/ipam/find/:ip', requireAuth, asyncRoute(async (req, res) => {
+  const { ip } = req.params;
+  const subnet = await ipamRepo.findSubnetForIp(ip);
+  res.json({ ip, subnet: subnet || null });
+}));
+
+// ── Alerting ────────────────────────────────────────────────────────────────
+
+const { evaluateAlerts, BUILTIN_RULES } = require('./engine/alerting');
+
+app.get('/api/discovery/alerts', requireAuth, asyncRoute(async (req, res) => {
+  const scope = parseScope(req.query);
+  const limit = Math.min(parseInt(req.query.limit || '100', 10), 1000);
+  const severity = req.query.severity;
+  let query = 'SELECT * FROM observe_alerts WHERE tenant_id=$1 AND site_id=$2';
+  const params = [scope.tenant_id, scope.site_id];
+  if (severity) { query += ' AND severity=$3'; params.push(severity); }
+  query += ' ORDER BY fired_at DESC LIMIT $' + (params.length + 1);
+  params.push(limit);
+  const r = await db.query(query, params);
+  res.json({ alerts: r.rows, total: r.rowCount });
+}));
+
+app.get('/api/discovery/alerts/active', requireAuth, asyncRoute(async (req, res) => {
+  const scope = parseScope(req.query);
+  const r = await db.query(
+    'SELECT * FROM observe_alerts WHERE tenant_id=$1 AND site_id=$2 AND resolved_at IS NULL ORDER BY fired_at DESC LIMIT 500',
+    [scope.tenant_id, scope.site_id]
+  );
+  res.json({ alerts: r.rows, total: r.rowCount });
+}));
+
+app.post('/api/discovery/alerts/:id/acknowledge', requireAuth, asyncRoute(async (req, res) => {
+  const { id } = req.params;
+  const r = await db.query(
+    `UPDATE observe_alerts SET acknowledged=true, acknowledged_by=$2, acknowledged_at=NOW()
+     WHERE id=$1 AND acknowledged=false RETURNING *`,
+    [id, req.user?.sub || 'unknown']
+  );
+  if (!r.rows.length) return res.status(404).json({ error: 'not_found_or_already_acked' });
+  await logAudit(db, req, { resource_id: id });
+  res.json({ alert: r.rows[0] });
+}));
+
+app.get('/api/discovery/alerts/rules', requireAuth, asyncRoute(async (req, res) => {
+  const scope = parseScope(req.query);
+  const r = await db.query(
+    'SELECT * FROM observe_alert_rules WHERE tenant_id=$1 AND site_id=$2 ORDER BY name',
+    [scope.tenant_id, scope.site_id]
+  );
+  const all = r.rows.length > 0 ? r.rows : BUILTIN_RULES.map((rule, i) => ({
+    ...rule, id: `builtin-${i}`, conditions: JSON.stringify(rule.conditions),
+    transports: JSON.stringify(rule.transports), enabled: true,
+  }));
+  res.json({ rules: all, total: all.length });
+}));
+
+// ── Config Backup ───────────────────────────────────────────────────────────
+
+const { backupConfig } = require('./engine/config-backup');
+
+app.post('/api/discovery/config-backup/:host', requireAuth, asyncRoute(async (req, res) => {
+  const { host } = req.params;
+  const asset = {
+    host,
+    ssh_user: req.body?.ssh_user,
+    ssh_password: req.body?.ssh_password,
+    ssh_port: req.body?.ssh_port,
+    vendor: req.body?.vendor,
+  };
+  const result = await backupConfig(asset, db);
+  res.json(result);
+}));
+
+app.get('/api/discovery/config-backup', requireAuth, asyncRoute(async (req, res) => {
+  const host = req.query.host;
+  const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+  let query = 'SELECT id, host, vendor, method, success, sha256, lines, error, collected_at FROM observe_config_backups';
+  const params = [];
+  if (host) { query += ' WHERE host=$1'; params.push(host); }
+  query += ' ORDER BY collected_at DESC LIMIT $' + (params.length + 1);
+  params.push(limit);
+  const r = await db.query(query, params);
+  res.json({ backups: r.rows, total: r.rowCount });
+}));
+
+// ── 404 ─────────────────────────────────────────────────────────────────────
 
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 
@@ -626,7 +971,18 @@ const DISCOVERY_UI_HTML = `<!doctype html>
   <div id="app"></div>
   <script>
   const e = React.createElement;
+  const TOKEN = "__TOKEN_PLACEHOLDER__";
   const API = '/observe/discovery/api/discovery';
+
+  // ── Auth + Feedback ──────────────────────────────────────────────────────────
+  let _feedbackSet = null;
+  function showFeedback(msg) { if (_feedbackSet) _feedbackSet(msg); }
+
+  function authHeaders() {
+    const h = {};
+    if (TOKEN && TOKEN.length > 10) h['x-internal-token'] = TOKEN;
+    return h;
+  }
 
   // ── Traduções ────────────────────────────────────────────────────────────────
   const ESTADO = { discovered:'Descoberto', approved:'Aprovado', monitored:'Monitorado', ignored:'Ignorado', quarantined:'Quarentenado', disappeared:'Desaparecido' };
@@ -1335,12 +1691,17 @@ const DISCOVERY_UI_HTML = `<!doctype html>
           items.length === 0 ? e('tr', null, e('td', { colSpan:6, style:{textAlign:'center',color:'#8b949e',padding:'2rem'} }, 'Nenhum serviço encontrado.')) : null,
           items.map(s => {
             const asset = assetMap[s.asset_id];
+            const fp = (typeof s.fingerprint === 'string' ? JSON.parse(s.fingerprint || '{}') : (s.fingerprint || {}));
+            const tech = fp.technology || '';
+            const banner = fp.banner ? String(fp.banner).slice(0,60) : '';
+            const product = fp.product_hint || fp.product || '';
             return e('tr', { key:s.id },
               e('td', null, asset?.asset_name || '—'),
               e('td', null, e('code', { style:{color:'#58a6ff',fontSize:'.8rem'} }, asset?.primary_ip || '—')),
               e('td', null, s.port),
               e('td', null, (s.protocol||'tcp').toUpperCase()),
-              e('td', null, s.service_name || s.service_key),
+              e('td', null, e('span', { title:banner }, tech || product || s.service_name || s.service_key)),
+              e('td', null, banner ? e('code', { style:{fontSize:'.7rem',color:'#7ee787'} }, banner) : '—'),
               e('td', null, badge(s.status, s.status))
             );
           })
@@ -1466,6 +1827,8 @@ const DISCOVERY_UI_HTML = `<!doctype html>
     const [progress, setProgress] = React.useState(null);
     const pollRef = React.useRef(null);
 
+    React.useEffect(() => { _feedbackSet = setScanMsg; }, []);
+
     async function load() {
       const q = '?tenant_id='+encodeURIComponent(scope.tenant)+'&site_id='+encodeURIComponent(scope.site)+'&edge_id='+encodeURIComponent(scope.edge);
       try {
@@ -1479,12 +1842,12 @@ const DISCOVERY_UI_HTML = `<!doctype html>
           sites: Array.isArray(scopeSets.sites) ? scopeSets.sites : [],
           edges: Array.isArray(scopeSets.edges) ? scopeSets.edges : [],
         });
-      } catch(_) {}
+      } catch(err) { showFeedback('Falha ao carregar dados: '+(err.message||'erro de rede')); }
     }
 
     async function pollProgress() {
       try {
-        const r = await fetch(API+'/progress', { headers: {} });
+        const r = await fetch(API+'/progress');
         if (!r.ok) return;
         const p = await r.json();
         setProgress(p.active===false && !p.summary ? null : p);

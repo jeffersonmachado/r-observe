@@ -4,13 +4,23 @@ RUN apk add --no-cache wget curl
 
 WORKDIR /app
 
-COPY api/package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# O context eh /opt/results/ (parent de r-observe)
+COPY r-observe/r-observe/api/package*.json ./
+# Prepara @results/auth como tgz (nao pode usar file: via npm ci direto)
+COPY packages/auth/  /tmp/auth-src/
+RUN mkdir -p /tmp/auth-pkg && cd /tmp/auth-src && npm pack --pack-destination /tmp/auth-pkg && \
+    cp /tmp/auth-pkg/results-auth-*.tgz /tmp/auth.tgz && \
+    rm -rf /tmp/auth-src /tmp/auth-pkg
 
-COPY api/src/        ./src/
-COPY migrations/     ./migrations/
-COPY api/public/     ./public/
-COPY shared/         ./shared/
+# Remove a dependencia file do package.json e apaga lock (sera regenerado)
+RUN sed -i '/"@results\/auth"/d' /app/package.json && rm -f /app/package-lock.json
+
+RUN npm install --omit=dev && npm install --omit=dev /tmp/auth.tgz && npm cache clean --force && rm -f /tmp/auth.tgz
+
+COPY r-observe/r-observe/api/src/        ./src/
+COPY r-observe/r-observe/migrations/     ./migrations/
+COPY r-observe/r-observe/api/public/     ./public/
+COPY r-observe/r-observe/shared/         ./shared/
 
 RUN addgroup -S observe && adduser -S observe -G observe \
     && mkdir -p /app/data/evidence /app/data/replays /app/logs \

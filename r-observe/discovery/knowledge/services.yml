@@ -23,7 +23,7 @@ services:
     exporter_port: 9216
     exporter_job: mongodb-exporter
   - name: Redis
-    ports: [6379, 6380]
+    ports: [6379, 6380, 16379]
     protocol: tcp
     dependency_type: service_cache
     exporter_port: 9121
@@ -34,34 +34,40 @@ services:
     dependency_type: service_search
     exporter_port: 9114
     exporter_job: elasticsearch-exporter
+  - name: Microsoft SQL Server
+    ports: [1433]
+    protocol: tcp
+    dependency_type: service_database
+  - name: Oracle DB
+    ports: [1521, 2483]
+    protocol: tcp
+    dependency_type: service_database
+  - name: InfluxDB
+    ports: [8086]
+    protocol: tcp
+    dependency_type: service_database
+  - name: Cassandra
+    ports: [9042]
+    protocol: tcp
+    dependency_type: service_database
+  - name: Neo4j
+    ports: [7474, 7687]
+    protocol: tcp
+    dependency_type: service_graph_db
+  - name: ArangoDB
+    ports: [8529]
+    protocol: tcp
+    dependency_type: service_graph_db
+  - name: RethinkDB
+    ports: [28015]
+    protocol: tcp
+    dependency_type: service_database
 
   # ── DNS ────────────────────────────────────────────────────────────────
   - name: DNS
     ports: [53]
     protocol: udp
     dependency_type: service_dns
-
-  # ── Observability Exporters ─────────────────────────────────────────────
-  - name: Node Exporter
-    ports: [9100]
-    protocol: tcp
-    exporter_job: node-exporter
-  - name: Prometheus
-    ports: [9090]
-    protocol: tcp
-    exporter_job: prometheus
-  - name: Nginx Exporter
-    ports: [9113]
-    protocol: tcp
-    exporter_job: nginx-exporter
-  - name: Apache Exporter
-    ports: [9117]
-    protocol: tcp
-    exporter_job: apache-exporter
-  - name: Blackbox Exporter
-    ports: [9115]
-    protocol: tcp
-    exporter_job: blackbox-exporter
 
   # ── Message Queues ─────────────────────────────────────────────────────
   - name: RabbitMQ
@@ -76,3 +82,299 @@ services:
     dependency_type: service_messaging
     exporter_port: 9308
     exporter_job: kafka-exporter
+  - name: ActiveMQ
+    ports: [61616]
+    protocol: tcp
+    dependency_type: service_messaging
+
+  # ── Observability ──────────────────────────────────────────────────────
+  - name: Node Exporter
+    ports: [9100]
+    protocol: tcp
+    exporter_job: node-exporter
+  - name: Prometheus
+    ports: [9090, 9091, 9099]
+    protocol: tcp
+    exporter_job: prometheus
+  - name: Nginx Exporter
+    ports: [9113, 9101]
+    protocol: tcp
+    exporter_job: nginx-exporter
+  - name: Apache Exporter
+    ports: [9117, 9105]
+    protocol: tcp
+    exporter_job: apache-exporter
+  - name: Blackbox Exporter
+    ports: [9115]
+    protocol: tcp
+    exporter_job: blackbox-exporter
+  - name: SNMP Exporter
+    ports: [9116]
+    protocol: tcp
+    exporter_job: snmp-exporter
+  - name: cAdvisor
+    ports: [9130]
+    protocol: tcp
+    exporter_job: cadvisor
+  - name: Icinga2
+    ports: [5665]
+    protocol: tcp
+    dependency_type: service_monitoring
+  - name: NRPE
+    ports: [5666]
+    protocol: tcp
+    dependency_type: service_monitoring
+  - name: Zabbix Agent
+    ports: [10050]
+    protocol: tcp
+    dependency_type: service_monitoring
+  - name: Zabbix Server
+    ports: [10051]
+    protocol: tcp
+    dependency_type: service_monitoring
+  - name: OpenTelemetry Collector
+    ports: [4317, 4318, 8888]
+    protocol: tcp
+    dependency_type: service_observability
+  - name: Grafana
+    ports: [3000, 3001]
+    protocol: tcp
+    dependency_type: service_observability
+  - name: Grafana Loki
+    ports: [3100]
+    protocol: tcp
+    dependency_type: service_observability
+  - name: Splunk
+    ports: [8089, 9997]
+    protocol: tcp
+    dependency_type: service_observability
+  - name: Telegraf
+    ports: [8300]
+    protocol: tcp
+    dependency_type: service_observability
+
+  # ── Orchestration ──────────────────────────────────────────────────────
+  - name: Kubernetes API
+    ports: [6443, 10250, 10255, 10256]
+    protocol: tcp
+    dependency_type: service_orchestration
+  - name: Docker Engine
+    ports: [2375, 2376]
+    protocol: tcp
+    dependency_type: service_container
+  - name: Consul
+    ports: [8500]
+    protocol: tcp
+    dependency_type: service_coordination
+  - name: etcd
+    ports: [19000, 19001]
+    protocol: tcp
+    dependency_type: service_coordination
+  - name: ZooKeeper
+    ports: [2181]
+    protocol: tcp
+    dependency_type: service_coordination
+  - name: Puppet
+    ports: [8140, 8139]
+    protocol: tcp
+    dependency_type: service_orchestration
+  - name: HashiCorp Vault
+    ports: [8200]
+    protocol: tcp
+    dependency_type: service_security
+
+  # ── Caches ──────────────────────────────────────────────────────────────
+  - name: Memcached
+    ports: [11211]
+    protocol: tcp
+    dependency_type: service_cache
+  - name: Varnish
+    ports: [6081]
+    protocol: tcp
+    dependency_type: service_cache
+
+  # ── Web / Proxy ─────────────────────────────────────────────────────────
+  - name: Nginx
+    ports: [80, 443]
+    protocol: tcp
+    dependency_type: service_web
+  - name: Apache HTTPD
+    ports: [80, 443]
+    protocol: tcp
+    dependency_type: service_web
+  - name: HAProxy
+    ports: [9530]
+    protocol: tcp
+    dependency_type: service_proxy
+  - name: Squid
+    ports: [3128]
+    protocol: tcp
+    dependency_type: service_proxy
+  - name: Traefik
+    ports: [8080, 8443]
+    protocol: tcp
+    dependency_type: service_proxy
+
+  # ── Storage ─────────────────────────────────────────────────────────────
+  - name: NFS
+    ports: [2049]
+    protocol: tcp
+    dependency_type: service_storage
+  - name: iSCSI
+    ports: [3260]
+    protocol: tcp
+    dependency_type: service_storage
+  - name: SMB/CIFS
+    ports: [445, 139]
+    protocol: tcp
+    dependency_type: service_storage
+  - name: Synology DSM
+    ports: [5000, 5001, 5002]
+    protocol: tcp
+    dependency_type: service_storage
+  - name: QNAP
+    ports: [8080, 443]
+    protocol: tcp
+    dependency_type: service_storage
+
+  # ── Virtualization ──────────────────────────────────────────────────────
+  - name: VMware ESXi
+    ports: [902, 903, 8222]
+    protocol: tcp
+    dependency_type: service_virtualization
+  - name: Proxmox VE
+    ports: [8006]
+    protocol: tcp
+    dependency_type: service_virtualization
+
+  # ── Voice / Video ───────────────────────────────────────────────────────
+  - name: SIP
+    ports: [5060, 5061]
+    protocol: udp
+    dependency_type: service_voice
+  - name: Asterisk
+    ports: [5038, 5040, 5060, 4569]
+    protocol: tcp
+    dependency_type: service_voice
+  - name: STUN/TURN
+    ports: [3478, 5349]
+    protocol: tcp
+    dependency_type: service_voice
+
+  # ── Remote Access ───────────────────────────────────────────────────────
+  - name: SSH
+    ports: [22]
+    protocol: tcp
+    dependency_type: service_remote_access
+  - name: RDP
+    ports: [3389]
+    protocol: tcp
+    dependency_type: service_remote_access
+  - name: VNC
+    ports: [5900, 5901, 5800]
+    protocol: tcp
+    dependency_type: service_remote_access
+  - name: TeamViewer
+    ports: [5938, 8767]
+    protocol: tcp
+    dependency_type: service_remote_access
+
+  # ── Mail ────────────────────────────────────────────────────────────────
+  - name: SMTP
+    ports: [25, 465, 587]
+    protocol: tcp
+    dependency_type: service_mail
+  - name: IMAP
+    ports: [143, 993]
+    protocol: tcp
+    dependency_type: service_mail
+  - name: POP3
+    ports: [110, 995]
+    protocol: tcp
+    dependency_type: service_mail
+
+  # ── IoT / Industrial ────────────────────────────────────────────────────
+  - name: MQTT
+    ports: [1883, 8883]
+    protocol: tcp
+    dependency_type: service_iot
+  - name: Modbus
+    ports: [502]
+    protocol: tcp
+    dependency_type: service_industrial
+  - name: BACnet
+    ports: [47808]
+    protocol: tcp
+    dependency_type: service_industrial
+  - name: EtherNet/IP
+    ports: [44818, 2968]
+    protocol: tcp
+    dependency_type: service_industrial
+
+  # ── Security ────────────────────────────────────────────────────────────
+  - name: LDAP
+    ports: [389, 636]
+    protocol: tcp
+    dependency_type: service_directory
+  - name: RADIUS
+    ports: [1812, 1813]
+    protocol: udp
+    dependency_type: service_aaa
+
+  # ── VPN ─────────────────────────────────────────────────────────────────
+  - name: OpenVPN
+    ports: [1194]
+    protocol: tcp
+    dependency_type: service_vpn
+  - name: WireGuard
+    ports: [51820]
+    protocol: udp
+    dependency_type: service_vpn
+  - name: IPsec/IKE
+    ports: [500, 4500, 1293]
+    protocol: udp
+    dependency_type: service_vpn
+  - name: L2TP
+    ports: [1701]
+    protocol: udp
+    dependency_type: service_vpn
+  - name: PPTP
+    ports: [1723]
+    protocol: tcp
+    dependency_type: service_vpn
+
+  # ── Network Management ──────────────────────────────────────────────────
+  - name: SNMP
+    ports: [161, 10161]
+    protocol: udp
+    dependency_type: service_network_mgmt
+  - name: SNMP Trap
+    ports: [162, 10162]
+    protocol: udp
+    dependency_type: service_network_mgmt
+  - name: Cisco NX-API
+    ports: [9440]
+    protocol: tcp
+    dependency_type: service_network_mgmt
+  - name: MikroTik API
+    ports: [8728, 8729]
+    protocol: tcp
+    dependency_type: service_network_mgmt
+
+  # ── Misc ────────────────────────────────────────────────────────────────
+  - name: NTP
+    ports: [123]
+    protocol: udp
+    dependency_type: service_infrastructure
+  - name: DHCP Server
+    ports: [67]
+    protocol: udp
+    dependency_type: service_infrastructure
+  - name: TFTP
+    ports: [69]
+    protocol: udp
+    dependency_type: service_infrastructure
+  - name: mDNS/Bonjour
+    ports: [5353]
+    protocol: udp
+    dependency_type: service_iot

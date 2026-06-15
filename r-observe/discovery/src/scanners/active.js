@@ -226,6 +226,28 @@ async function activeScanTarget(target, policy) {
     ? await readTcpBanner(target.address, open.includes(25) ? 25 : open.includes(587) ? 587 : 465, 1800)
     : null;
 
+  // ── Banner grabbing para portas de servicos conhecidos ───────────────
+  const alreadyProbed = new Set([22, 25, 80, 443, 161, 554, 3702, 465, 587, 5060]);
+  const BANNER_WORTHY = new Set([21, 110, 143, 993, 995, 3306, 5432, 6379, 6380, 8080, 8443, 9090, 9200, 27017, 5672, 11211, 9092, 2181, 2375, 2376]);
+  const bannerPorts = open.filter(p => !alreadyProbed.has(p) && BANNER_WORTHY.has(p));
+  const portBanners = {};
+  if (bannerPorts.length > 0) {
+    const bannerResults = await Promise.all(bannerPorts.map(async (port) => {
+      try {
+        const banner = await Promise.race([
+          readTcpBanner(target.address, port, 600),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+        ]);
+        return { port, banner };
+      } catch {
+        return { port, banner: null };
+      }
+    }));
+    for (const { port, banner } of bannerResults) {
+      if (banner) portBanners[port] = String(banner).slice(0, 512);
+    }
+  }
+
   const probeTimeout = Math.min(2500, Math.max(800, profile.timeoutMs || 1800));
   const sipProbe = (open.includes(5060) || policy.allow_udp) ? await probeSipOptions(target.address, probeTimeout) : { responded: false, status: 'not_attempted' };
   const rtspProbe = open.includes(554) ? await probeRtspOptions(target.address, probeTimeout) : { responded: false, status: 'not_attempted' };
@@ -278,6 +300,7 @@ async function activeScanTarget(target, policy) {
     snmp_interfaces: snmpData?.interfaces || [],
     snmp_vlans: snmpData?.vlans || [],
     deep_probes: deepProbes,
+    port_banners: portBanners,
     protocols_detected: {
       arp: false,
       icmp: true,

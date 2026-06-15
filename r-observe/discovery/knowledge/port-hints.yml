@@ -232,3 +232,1099 @@ ports:
     technology: rethinkdb
     category: database
     product: RethinkDB
+  10250:
+    technology: kubernetes
+    category: orchestration
+    product: Kubelet API
+  10255:
+    technology: kubernetes
+    category: orchestration
+    product: Kubelet Read-Only
+  6443:
+    technology: kubernetes
+    category: orchestration
+    product: Kubernetes API Server
+  2375:
+    technology: docker
+    category: container
+    product: Docker API (insecure)
+  2376:
+    technology: docker
+    category: container
+    product: Docker API (TLS)
+  2181:
+    technology: zookeeper
+    category: coordination
+    product: ZooKeeper
+  4317:
+    technology: opentelemetry
+    category: observability
+    product: OTel Collector gRPC
+  4318:
+    technology: opentelemetry
+    category: observability
+    product: OTel Collector HTTP
+  5665:
+    technology: icinga2
+    category: monitoring
+    product: Icinga2 API
+  5666:
+    technology: nrpe
+    category: monitoring
+    product: Nagios NRPE
+  6380:
+    technology: redis
+    category: cache
+    product: Redis (alt port)
+  15672:
+    technology: rabbitmq
+    category: messaging
+    product: RabbitMQ Management
+  3001:
+    technology: grafana
+    category: observability
+    product: Grafana (alt)
+  3100:
+    technology: loki
+    category: observability
+    product: Grafana Loki
+  67:
+    technology: dhcp
+    category: infrastructure
+    product: DHCP Server
+  68:
+    technology: dhcp
+    category: infrastructure
+    product: DHCP Client
+  69:
+    technology: tftp
+    category: infrastructure
+    product: TFTP Service
+  111:
+    technology: rpc
+    category: infrastructure
+    product: Portmapper/RPCBind
+  137:
+    technology: netbios
+    category: infrastructure
+    product: NetBIOS Name Service
+  138:
+    technology: netbios
+    category: infrastructure
+    product: NetBIOS Datagram
+  139:
+    technology: netbios
+    category: infrastructure
+    product: NetBIOS Session
+  162:
+    technology: snmp
+    category: infrastructure
+    product: SNMP Trap
+  179:
+    technology: bgp
+    category: routing
+    product: BGP
+  194:
+    technology: irc
+    category: chat
+    product: IRC Server
+  427:
+    technology: svrloc
+    category: infrastructure
+    product: Service Location Protocol
+  500:
+    technology: ike
+    category: vpn
+    product: IKE (IPsec)
+  514:
+    technology: syslog
+    category: infrastructure
+    product: Syslog
+  515:
+    technology: lpd
+    category: infrastructure
+    product: Printer (LPD)
+  520:
+    technology: rip
+    category: routing
+    product: RIP
+  548:
+    technology: afp
+    category: storage
+    product: Apple File Protocol
+  623:
+    technology: ipmi
+    category: infrastructure
+    product: IPMI/BMC
+  631:
+    technology: ipp
+    category: infrastructure
+    product: IPP/CUPS Printer
+  636:
+    technology: ldap
+    category: directory
+    product: LDAPS Service
+  873:
+    technology: rsync
+    category: storage
+    product: Rsync
+  902:
+    technology: vmware
+    category: virtualization
+    product: VMware ESXi
+  903:
+    technology: vmware
+    category: virtualization
+    product: VMware Remote Console
+  989:
+    technology: ftp
+    category: infrastructure
+    product: FTPS Data
+  990:
+    technology: ftp
+    category: infrastructure
+    product: FTPS Control
+  1022:
+    technology: smb
+    category: infrastructure
+    product: SMB (alt)
+  1080:
+    technology: socks
+    category: proxy
+    product: SOCKS Proxy
+  1194:
+    technology: openvpn
+    category: vpn
+    product: OpenVPN
+  1293:
+    technology: ipsec
+    category: vpn
+    product: IPSec NAT-T
+  1433:
+    technology: mssql
+    category: database
+    product: Microsoft SQL Server
+  1434:
+    technology: mssql
+    category: database
+    product: MSSQL Browser
+  1521:
+    technology: oracle
+    category: database
+    product: Oracle DB
+  1701:
+    technology: l2tp
+    category: vpn
+    product: L2TP
+  1812:
+    technology: radius
+    category: aaa
+    product: RADIUS Auth
+  1813:
+    technology: radius
+    category: aaa
+    product: RADIUS Accounting
+  1900:
+    technology: ssdp
+    category: iot
+    product: SSDP UPnP
+  2049:
+    technology: nfs
+    category: storage
+    product: NFS
+  2082:
+    technology: cpanel
+    category: hosting
+    product: cPanel
+  2083:
+    technology: cpanel
+    category: hosting
+    product: cPanel SSL
+  2086:
+    technology: whm
+    category: hosting
+    product: WHM
+  2087:
+    technology: whm
+    category: hosting
+    product: WHM SSL
+  2222:
+    technology: ssh
+    category: infrastructure
+    product: SSH (alt port / DirectAdmin)
+  2483:
+    technology: oracle
+    category: database
+    product: Oracle DB SSL
+  2512:
+    technology: citrix
+    category: remote-access
+    product: Citrix ICA
+  2968:
+    technology: enip
+    category: industrial
+    product: EtherNet/IP
+  3128:
+    technology: squid
+    category: proxy
+    product: Squid Proxy
+  3260:
+    technology: iscsi
+    category: storage
+    product: iSCSI Target
+  3283:
+    technology: apple-remote
+    category: remote-access
+    product: Apple Remote Desktop
+  3478:
+    technology: stun
+    category: voice
+    product: STUN/TURN
+  3632:
+    technology: distcc
+    category: build
+    product: DistCC
+  3689:
+    technology: daap
+    category: media
+    product: DAAP (iTunes)
+  3690:
+    technology: svn
+    category: scm
+    product: SVN
+  4190:
+    technology: sieve
+    category: mail
+    product: Sieve Mail Filter
+  4321:
+    technology: rwhois
+    category: infrastructure
+    product: RWhois
+  4444:
+    technology: http
+    category: web
+    product: Web Admin (alt)
+  4500:
+    technology: ipsec
+    category: vpn
+    product: IPSec NAT-T
+  4559:
+    technology: hylafax
+    category: infrastructure
+    product: HylaFAX
+  4569:
+    technology: iax
+    category: voice
+    product: IAX2 (Asterisk)
+  4664:
+    technology: google
+    category: search
+    product: Google Desktop
+  4782:
+    technology: sip
+    category: voice
+    product: SIP over TCP
+  4848:
+    technology: http
+    category: web
+    product: Web Admin (GlassFish)
+  4899:
+    technology: radmin
+    category: remote-access
+    product: Radmin
+  5001:
+    technology: synology
+    category: storage
+    product: Synology DSM
+  5002:
+    technology: synology
+    category: storage
+    product: Synology Photo
+  5005:
+    technology: avahi
+    category: iot
+    product: Avahi/Bonjour
+  5009:
+    technology: winrm
+    category: remote-access
+    product: WinRM
+  5038:
+    technology: asterisk
+    category: voice
+    product: Asterisk AMI
+  5040:
+    technology: asterisk
+    category: voice
+    product: Asterisk ARI
+  5050:
+    technology: sip
+    category: voice
+    product: SIP Proxy
+  5051:
+    technology: sip
+    category: voice
+    product: SIP Proxy TLS
+  5093:
+    technology: nrpe
+    category: monitoring
+    product: NRPE over TLS
+  5222:
+    technology: xmpp
+    category: chat
+    product: XMPP Client
+  5223:
+    technology: xmpp
+    category: chat
+    product: XMPP Client SSL
+  5269:
+    technology: xmpp
+    category: chat
+    product: XMPP Server
+  5280:
+    technology: xmpp
+    category: chat
+    product: XMPP BOSH
+  5349:
+    technology: stun
+    category: voice
+    product: STUN/TURN TLS
+  5353:
+    technology: mdns
+    category: iot
+    product: mDNS / Bonjour
+  5355:
+    technology: llmnr
+    category: infrastructure
+    product: LLMNR
+  5357:
+    technology: ws-discovery
+    category: iot
+    product: WS-Discovery
+  5405:
+    technology: netsupport
+    category: remote-access
+    product: NetSupport
+  5433:
+    technology: postgres
+    category: database
+    product: PostgreSQL (alt)
+  5555:
+    technology: android
+    category: mobile
+    product: Android ADB
+  5556:
+    technology: android
+    category: mobile
+    product: Android ADB Emulator
+  5631:
+    technology: pcanywhere
+    category: remote-access
+    product: pcAnywhere
+  5632:
+    technology: pcanywhere
+    category: remote-access
+    product: pcAnywhere UDP
+  5671:
+    technology: amqp
+    category: messaging
+    product: RabbitMQ AMQPS
+  5683:
+    technology: coap
+    category: iot
+    product: CoAP
+  5684:
+    technology: coap
+    category: iot
+    product: CoAP over DTLS
+  5722:
+    technology: dfsr
+    category: infrastructure
+    product: DFS Replication
+  5800:
+    technology: vnc
+    category: remote-access
+    product: VNC (alt)
+  5900:
+    technology: vnc
+    category: remote-access
+    product: VNC
+  5901:
+    technology: vnc
+    category: remote-access
+    product: VNC Display :1
+  5938:
+    technology: teamviewer
+    category: remote-access
+    product: TeamViewer
+  5984:
+    technology: cim
+    category: infrastructure
+    product: CIM/WBEM
+  5985:
+    technology: winrm
+    category: remote-access
+    product: WinRM HTTP
+  5986:
+    technology: winrm
+    category: remote-access
+    product: WinRM HTTPS
+  5989:
+    technology: wbem
+    category: infrastructure
+    product: CIM/WBEM SSL
+  6000:
+    technology: x11
+    category: remote-access
+    product: X11
+  6001:
+    technology: x11
+    category: remote-access
+    product: X11 :1
+  6060:
+    technology: http
+    category: web
+    product: HTTP Mgmt (alt)
+  6129:
+    technology: dameware
+    category: remote-access
+    product: DameWare
+  6230:
+    technology: ipmi
+    category: infrastructure
+    product: IPMI RMCP+
+  6370:
+    technology: redis
+    category: cache
+    product: Redis Sentinel
+  6514:
+    technology: syslog
+    category: infrastructure
+    product: Syslog over TLS
+  6640:
+    technology: ospf
+    category: routing
+    product: OSPF Multicast
+  6666:
+    technology: irc
+    category: chat
+    product: IRC (alt)
+  6667:
+    technology: irc
+    category: chat
+    product: IRC Standard
+  6697:
+    technology: irc
+    category: chat
+    product: IRC over TLS
+  6881:
+    technology: bittorrent
+    category: p2p
+    product: BitTorrent
+  6969:
+    technology: bittorrent
+    category: p2p
+    product: BitTorrent Tracker
+  7070:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  7100:
+    technology: xfs
+    category: infrastructure
+    product: X Font Server
+  7200:
+    technology: media
+    category: media
+    product: Media Server (alt)
+  7400:
+    technology: rtsp
+    category: iot
+    product: RTSP (alt)
+  7432:
+    technology: postgres
+    category: database
+    product: PostgreSQL (alt)
+  7474:
+    technology: neo4j
+    category: graph-db
+    product: Neo4j Browser
+  7547:
+    technology: cwmp
+    category: infrastructure
+    product: CWMP/TR-069 (CPE mgmt)
+  7569:
+    technology: controlid
+    category: security
+    product: ControlID Web
+  7687:
+    technology: neo4j
+    category: graph-db
+    product: Neo4j Bolt
+  7777:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  8006:
+    technology: java
+    category: application
+    product: Tomcat Shutdown
+  8010:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  8042:
+    technology: orthanc
+    category: medical
+    product: Orthanc DICOM
+  8069:
+    technology: odoo
+    category: erp
+    product: Odoo
+  8070:
+    technology: odoo
+    category: erp
+    product: Odoo (alt)
+  8082:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  8083:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  8086:
+    technology: influxdb
+    category: database
+    product: InfluxDB
+  8087:
+    technology: riak
+    category: database
+    product: Riak Protocol Buffers
+  8089:
+    technology: splunk
+    category: observability
+    product: Splunk HTTP
+  8090:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  8096:
+    technology: emby
+    category: media
+    product: Emby/Jellyfin
+  8098:
+    technology: riak
+    category: database
+    product: Riak HTTP
+  8100:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  8112:
+    technology: deluge
+    category: p2p
+    product: Deluge Web UI
+  8118:
+    technology: privoxy
+    category: proxy
+    product: Privoxy
+  8123:
+    technology: polipo
+    category: proxy
+    product: Polipo
+  8125:
+    technology: rtmp
+    category: media
+    product: RTMP
+  8139:
+    technology: puppet
+    category: orchestration
+    product: Puppet Agent
+  8140:
+    technology: puppet
+    category: orchestration
+    product: Puppet Server
+  8161:
+    technology: patrol
+    category: monitoring
+    product: BMC Patrol
+  8181:
+    technology: http
+    category: web
+    product: HTTP Mgmt
+  8200:
+    technology: vault
+    category: security
+    product: HashiCorp Vault
+  8222:
+    technology: vmware
+    category: virtualization
+    product: VMware Server
+  8243:
+    technology: https
+    category: web
+    product: HTTPS (alt)
+  8280:
+    technology: https
+    category: web
+    product: HTTPS (alt)
+  8291:
+    technology: mikrotik
+    category: infrastructure
+    product: MikroTik Winbox
+  8300:
+    technology: telegraf
+    category: observability
+    product: Telegraf
+  8333:
+    technology: bitcoin
+    category: crypto
+    product: Bitcoin Node
+  8383:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  8400:
+    technology: cvs
+    category: scm
+    product: CVS
+  8444:
+    technology: https
+    category: web
+    product: HTTPS (alt)
+  8500:
+    technology: consul
+    category: coordination
+    product: Consul
+  8529:
+    technology: arangodb
+    category: graph-db
+    product: ArangoDB
+  8530:
+    technology: ws-discovery
+    category: iot
+    product: WS-Discovery
+  8531:
+    technology: ws-discovery
+    category: iot
+    product: WS-Discovery
+  8554:
+    technology: rtsp
+    category: iot
+    product: RTSP (alt)
+  8600:
+    technology: asterisk
+    category: voice
+    product: Asterisk (alt)
+  8612:
+    technology: canon
+    category: iot
+    product: Canon BJNP
+  8728:
+    technology: mikrotik
+    category: infrastructure
+    product: MikroTik API
+  8729:
+    technology: mikrotik
+    category: infrastructure
+    product: MikroTik API-SSL
+  8765:
+    technology: ultravnc
+    category: remote-access
+    product: UltraVNC
+  8767:
+    technology: teamviewer
+    category: remote-access
+    product: TeamViewer (alt)
+  8834:
+    technology: nessus
+    category: security
+    product: Nessus
+  8840:
+    technology: openvas
+    category: security
+    product: OpenVAS
+  8880:
+    technology: cddbp
+    category: media
+    product: CDDB
+  8883:
+    technology: mqtt
+    category: iot
+    product: MQTT over TLS
+  8983:
+    technology: solr
+    category: search
+    product: Apache Solr
+  8999:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  9002:
+    technology: hbase
+    category: database
+    product: HBase Master
+  9009:
+    technology: hbase
+    category: database
+    product: HBase RegionServer
+  9010:
+    technology: sge
+    category: hpc
+    product: SGE qmaster
+  9020:
+    technology: wi-sun
+    category: iot
+    product: Wi-SUN FAN
+  9030:
+    technology: tor
+    category: anonymizer
+    product: Tor DirPort
+  9040:
+    technology: java
+    category: application
+    product: Java App (alt)
+  9042:
+    technology: cassandra
+    category: database
+    product: Cassandra Native
+  9050:
+    technology: tor
+    category: anonymizer
+    product: Tor SOCKS
+  9051:
+    technology: tor
+    category: anonymizer
+    product: Tor Control
+  9060:
+    technology: websphere
+    category: application
+    product: WebSphere Admin
+  9080:
+    technology: websphere
+    category: application
+    product: WebSphere HTTP
+  9084:
+    technology: aurora
+    category: hpc
+    product: Apache Aurora
+  9091:
+    technology: prometheus
+    category: observability
+    product: Prometheus Pushgateway
+  9099:
+    technology: prometheus
+    category: observability
+    product: Prometheus (alt)
+  9101:
+    technology: nginx-exporter
+    category: observability
+    product: Nginx Exporter (alt)
+  9102:
+    technology: bacula
+    category: backup
+    product: Bacula Director
+  9103:
+    technology: bacula
+    category: backup
+    product: Bacula Storage
+  9104:
+    technology: mysql-exporter
+    category: observability
+    product: MySQL Exporter
+  9105:
+    technology: apache-exporter
+    category: observability
+    product: Apache Exporter
+  9107:
+    technology: consul-exporter
+    category: observability
+    product: Consul Exporter
+  9110:
+    technology: rabbitmq-exporter
+    category: observability
+    product: RabbitMQ Exporter
+  9111:
+    technology: java-exporter
+    category: observability
+    product: JMX Exporter
+  9116:
+    technology: snmp-exporter
+    category: observability
+    product: SNMP Exporter
+  9118:
+    technology: redis-exporter
+    category: observability
+    product: Redis Exporter
+  9130:
+    technology: cadvisor
+    category: observability
+    product: cAdvisor
+  9150:
+    technology: prometheus
+    category: observability
+    product: Prometheus (alt)
+  9162:
+    technology: snmp
+    category: monitoring
+    product: SNMP Trap Listener
+  9165:
+    technology: postgres-exporter
+    category: observability
+    product: PG Exporter (alt)
+  9171:
+    technology: elasticsearch-exporter
+    category: observability
+    product: ES Exporter
+  9182:
+    technology: postgres
+    category: database
+    product: PostgreSQL (alt)
+  9191:
+    technology: opentsdb
+    category: database
+    product: OpenTSDB
+  9216:
+    technology: mongodb-exporter
+    category: observability
+    product: MongoDB Exporter
+  9249:
+    technology: aodv
+    category: routing
+    product: AODV
+  9255:
+    technology: mongodb-exporter
+    category: observability
+    product: MongoDB Exporter (alt)
+  9273:
+    technology: rds
+    category: database
+    product: AWS RDS Proxy
+  9312:
+    technology: sphinx
+    category: search
+    product: Sphinx Search
+  9332:
+    technology: gpfs
+    category: storage
+    product: GPFS/Spectrum Scale
+  9340:
+    technology: mgmt
+    category: infrastructure
+    product: Management (alt)
+  9389:
+    technology: adws
+    category: infrastructure
+    product: AD Web Services
+  9392:
+    technology: openvas
+    category: security
+    product: OpenVAS Manager
+  9418:
+    technology: git
+    category: scm
+    product: Git
+  9419:
+    technology: rabbitmq-exporter
+    category: observability
+    product: RabbitMQ Exporter (alt)
+  9440:
+    technology: cisco
+    category: network_device
+    product: Cisco NX-API
+  9495:
+    technology: python
+    category: application
+    product: Python WSGI (alt)
+  9530:
+    technology: haproxy
+    category: proxy
+    product: HAProxy Stats
+  9595:
+    technology: pds
+    category: infrastructure
+    product: Printer PDS
+  9600:
+    technology: omnivision
+    category: security
+    product: OmniVision
+  9669:
+    technology: vpro
+    category: infrastructure
+    product: Intel vPro
+  9675:
+    technology: spiceworks
+    category: monitoring
+    product: Spiceworks
+  9696:
+    technology: websense
+    category: security
+    product: WebSense
+  9780:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  9800:
+    technology: webdav
+    category: web
+    product: WebDAV
+  9875:
+    technology: sap
+    category: erp
+    product: SAP
+  9898:
+    technology: dabber
+    category: security
+    product: Tripwire
+  9943:
+    technology: spiceworks
+    category: monitoring
+    product: Spiceworks SSL
+  9944:
+    technology: cs2
+    category: infrastructure
+    product: CS2
+  9981:
+    technology: scp
+    category: infrastructure
+    product: SCP over SSH (alt)
+  9997:
+    technology: splunk
+    category: observability
+    product: Splunk Forwarder
+  9998:
+    technology: distcc
+    category: build
+    product: DistCC (alt)
+  10000:
+    technology: webmin
+    category: administration
+    product: Webmin
+  10001:
+    technology: scp
+    category: infrastructure
+    product: SCP (alt)
+  10050:
+    technology: zabbix
+    category: monitoring
+    product: Zabbix Agent
+  10051:
+    technology: zabbix
+    category: monitoring
+    product: Zabbix Server
+  10161:
+    technology: snmp
+    category: infrastructure
+    product: SNMP (alt port)
+  10162:
+    technology: snmp
+    category: infrastructure
+    product: SNMP Trap (alt)
+  10256:
+    technology: kubernetes
+    category: orchestration
+    product: K8s Controller
+  11215:
+    technology: memcached
+    category: cache
+    product: Memcached SSL
+  16379:
+    technology: redis
+    category: cache
+    product: Redis (alt)
+  17000:
+    technology: hbase
+    category: database
+    product: HBase REST
+  18080:
+    technology: spark
+    category: hpc
+    product: Apache Spark
+  18081:
+    technology: spark
+    category: hpc
+    product: Spark Worker
+  18082:
+    technology: spark
+    category: hpc
+    product: Spark Master (alt)
+  18083:
+    technology: spark
+    category: hpc
+    product: Spark History
+  19000:
+    technology: etcd
+    category: coordination
+    product: etcd Client
+  19001:
+    technology: etcd
+    category: coordination
+    product: etcd Peer
+  20000:
+    technology: dnp3
+    category: industrial
+    product: DNP3
+  21000:
+    technology: ambari
+    category: administration
+    product: Ambari Agent
+  22222:
+    technology: ssh
+    category: infrastructure
+    product: SSH (alt)
+  24680:
+    technology: qnap
+    category: storage
+    product: QNAP
+  24800:
+    technology: synology
+    category: storage
+    product: Synology (alt)
+  27000:
+    technology: flexlm
+    category: licensing
+    product: FlexLM License
+  33434:
+    technology: traceroute
+    category: infrastructure
+    product: Traceroute
+  35357:
+    technology: openstack
+    category: cloud
+    product: OpenStack Keystone
+  37777:
+    technology: dahua
+    category: security
+    product: Dahua DVR
+  44443:
+    technology: http
+    category: web
+    product: HTTP (alt)
+  44818:
+    technology: enip
+    category: industrial
+    product: EtherNet/IP (alt)
+  47808:
+    technology: bacnet
+    category: industrial
+    product: BACnet
+  50000:
+    technology: db2
+    category: database
+    product: IBM DB2
+  50070:
+    technology: hadoop
+    category: bigdata
+    product: Hadoop NameNode
+  50075:
+    technology: hadoop
+    category: bigdata
+    product: Hadoop DataNode
+  50090:
+    technology: hadoop
+    category: bigdata
+    product: Hadoop Secondary NN
+  61616:
+    technology: activemq
+    category: messaging
+    product: ActiveMQ
