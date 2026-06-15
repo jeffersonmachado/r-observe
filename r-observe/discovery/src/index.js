@@ -960,6 +960,7 @@ const DISCOVERY_UI_HTML = `<!doctype html>
   ${IS_DEV ? DEV_SCRIPT : '<link rel="stylesheet" href="/observe/discovery/data/discovery.css">'}
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body>
   <div class="topbar">
@@ -1355,7 +1356,7 @@ const DISCOVERY_UI_HTML = `<!doctype html>
   }
 
   // ── Aba: Políticas ───────────────────────────────────────────────────────────
-  const EMPTY_POLICY = { name:'', scan_profile:'safe', active_enabled:true, passive_enabled:true, allowed_ranges:'', blocked_ranges:'', max_rate_per_minute:300, host_timeout_ms:12000, max_concurrency:5, allow_udp:false, auto_prometheus_sd:true, auto_icinga_sync:false, is_default:false };
+  const EMPTY_POLICY = { name:'', scan_profile:'safe', active_enabled:true, passive_enabled:true, allowed_ranges:'', blocked_ranges:'', max_rate_per_minute:300, host_timeout_ms:12000, max_concurrency:5, allow_udp:false, auto_prometheus_sd:true, auto_icinga_sync:true, is_default:false };
 
   function PoliciesTab({ data, scope, reload }) {
     const { policies=[] } = data;
@@ -1816,6 +1817,312 @@ const DISCOVERY_UI_HTML = `<!doctype html>
     );
   }
 
+  // ── Aba: Topologia ──────────────────────────────────────────────────────────
+  function TopologyTab({ data, scope }) {
+    const { assets=[], topology=[] } = data;
+    const svgRef = React.useRef(null);
+
+    // Build graph data: nodes from assets + external refs, links from topology edges
+    const graph = React.useMemo(() => {
+      const assetMap = {};
+      for (const a of assets) assetMap[a.id] = a;
+
+      const nodes = [];
+      const nodeIds = new Set();
+      const links = [];
+
+      // Asset nodes
+      for (const a of assets) {
+        if (!nodeIds.has(a.id)) {
+          nodes.push({
+            id: a.id,
+            label: a.display_name || a.asset_name || a.id,
+            ip: a.primary_ip || '',
+            type: 'asset',
+            vendor: a.vendor,
+            lifecycle_state: a.lifecycle_state,
+          });
+          nodeIds.add(a.id);
+        }
+      }
+
+      // Process topology edges
+      for (const edge of topology) {
+        const targetId = edge.to_asset_ref || '';
+        if (!targetId) continue;
+
+        // Add external node if target is not an asset
+        if (!assetMap[targetId] && !nodeIds.has(targetId)) {
+          nodes.push({
+            id: targetId,
+            label: targetId,
+            ip: '',
+            type: 'external',
+            edgeType: edge.edge_type || '',
+          });
+          nodeIds.add(targetId);
+        }
+
+        links.push({
+          source: edge.from_asset_id,
+          target: targetId,
+          type: edge.edge_type || 'connected_to',
+        });
+      }
+
+      return { nodes, links, assetMap };
+    }, [assets, topology]);
+
+    // D3 force simulation inside SVG via ref
+    React.useEffect(() => {
+      if (!svgRef.current || graph.nodes.length === 0) return;
+      const svg = svgRef.current;
+      const W = 1000, H = 760;
+
+      svg.innerHTML = '';
+
+      // Color palette for edge types
+      const edgeColors = {
+        host_service: '#3b82f6',
+        service_dependency: '#f97316',
+        service_database: '#ef4444',
+        default_gateway: '#eab308',
+        depends_on: '#8b5cf6',
+        dns_resolver: '#22c55e',
+        connected_to: '#64748b',
+        runs_on: '#ec4899',
+      };
+      const edgeLabels = {
+        host_service: 'Serviço',
+        service_dependency: 'Dependência',
+        service_database: 'Database',
+        default_gateway: 'Gateway',
+        depends_on: 'Depende',
+        dns_resolver: 'DNS',
+        connected_to: 'Conectado',
+        runs_on: 'Roda em',
+      };
+      function edgeColor(t) { return edgeColors[t] || '#64748b'; }
+      function edgeLabel(t) { return edgeLabels[t] || t.replace(/_/g, ' '); }
+
+      // Clone nodes with random initial positions in center area
+      const simNodes = graph.nodes.map(n => ({
+        ...n, x: W/2 + (Math.random()-0.5)*200, y: H/2 + (Math.random()-0.5)*200,
+      }));
+      const nodeMap = {};
+      for (const n of simNodes) nodeMap[n.id] = n;
+
+      const simLinks = graph.links
+        .map(l => ({ ...l, source: nodeMap[l.source], target: nodeMap[l.target] }))
+        .filter(l => l.source && l.target);
+
+      if (simLinks.length === 0 || simNodes.length === 0) return;
+
+      // D3 simulation - stronger centering for large graphs, boundary forces
+      const nodeCount = simNodes.length;
+      const charge = nodeCount > 200 ? -200 : nodeCount > 100 ? -300 : -500;
+      const dist = nodeCount > 200 ? 80 : nodeCount > 100 ? 100 : 140;
+      const collideR = nodeCount > 200 ? 28 : nodeCount > 100 ? 32 : 40;
+
+      const sim = d3.forceSimulation(simNodes)
+        .force('link', d3.forceLink(simLinks).id(d => d.id).distance(dist))
+        .force('charge', d3.forceManyBody().strength(charge))
+        .force('center', d3.forceCenter(W/2, H/2))
+        .force('x', d3.forceX(W/2).strength(0.03))
+        .force('y', d3.forceY(H/2).strength(0.03))
+        .force('collision', d3.forceCollide(collideR));
+
+      // Build SVG groups
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      svg.appendChild(g);
+
+      // Arrow marker
+      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+      const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+      marker.setAttribute('id', 'arrow');
+      marker.setAttribute('viewBox', '0 0 10 10');
+      marker.setAttribute('refX', 24);
+      marker.setAttribute('refY', 5);
+      marker.setAttribute('markerWidth', 7);
+      marker.setAttribute('markerHeight', 7);
+      marker.setAttribute('orient', 'auto');
+      const mp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      mp.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+      mp.setAttribute('fill', '#475569');
+      marker.appendChild(mp);
+      defs.appendChild(marker);
+      svg.appendChild(defs);
+
+      // Link lines
+      const lineEls = simLinks.map(l => {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('stroke', edgeColor(l.type));
+        line.setAttribute('stroke-width', 1.5);
+        line.setAttribute('stroke-opacity', 0.4);
+        line.setAttribute('marker-end', 'url(#arrow)');
+        return line;
+      });
+      const linkG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      lineEls.forEach(el => linkG.appendChild(el));
+      g.appendChild(linkG);
+
+      // Node groups
+      const nodeGroups = simNodes.map(n => {
+        const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        group.setAttribute('cursor', n.type === 'asset' ? 'pointer' : 'default');
+
+        const isAsset = n.type === 'asset';
+        const r = isAsset ? 16 : 8;
+
+        // Circle
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('r', r);
+        circle.setAttribute('fill', isAsset ? '#1e293b' : '#334155');
+        circle.setAttribute('stroke', isAsset ? '#3b82f6' : '#eab308');
+        circle.setAttribute('stroke-width', isAsset ? 2 : 1.2);
+        circle.setAttribute('stroke-opacity', isAsset ? 1 : 0.7);
+        group.appendChild(circle);
+
+        // Label - truncate long refs
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('fill', isAsset ? '#e2e8f0' : '#94a3b8');
+        label.setAttribute('font-size', isAsset ? '9' : '7');
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('dy', r + 12);
+        let short = n.label;
+        if (short.length > 20) short = short.substring(0, 18) + '..';
+        label.textContent = short;
+        group.appendChild(label);
+
+        // IP subtitle for assets
+        if (isAsset && n.ip) {
+          const ipT = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          ipT.setAttribute('fill', '#64748b');
+          ipT.setAttribute('font-size', '7');
+          ipT.setAttribute('text-anchor', 'middle');
+          ipT.setAttribute('dy', r + 23);
+          ipT.textContent = n.ip;
+          group.appendChild(ipT);
+        }
+
+        if (isAsset) {
+          group.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            window.location.href = '/observe/assets/' + n.id;
+          });
+        }
+
+        return group;
+      });
+      nodeGroups.forEach(el => g.appendChild(el));
+
+      // Tick function with boundary clamping
+      const margin = 40;
+      const tickFn = () => {
+        lineEls.forEach((line, i) => {
+          const l = simLinks[i];
+          if (!l.source || !l.target) return;
+          line.setAttribute('x1', l.source.x);
+          line.setAttribute('y1', l.source.y);
+          line.setAttribute('x2', l.target.x);
+          line.setAttribute('y2', l.target.y);
+        });
+        nodeGroups.forEach((grp, i) => {
+          const n = simNodes[i];
+          // Clamp within viewBox
+          const r = n.type === 'asset' ? 16 : 8;
+          n.x = Math.max(margin + r, Math.min(W - margin - r, n.x));
+          n.y = Math.max(margin + r, Math.min(H - margin - r, n.y));
+          grp.setAttribute('transform', 'translate(' + n.x + ',' + n.y + ')');
+        });
+      };
+
+      // Link labels only for smaller graphs
+      if (simLinks.length <= 40) {
+        const linkLabelEls = simLinks.map(l => {
+          const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          t.setAttribute('fill', '#475569');
+          t.setAttribute('font-size', '8');
+          t.setAttribute('text-anchor', 'middle');
+          t.setAttribute('dy', -7);
+          t.textContent = edgeLabel(l.type);
+          return t;
+        });
+        const linkLG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        linkLabelEls.forEach(el => linkLG.appendChild(el));
+        g.appendChild(linkLG);
+        sim.on('tick', () => {
+          tickFn();
+          linkLabelEls.forEach((t, i) => {
+            const l = simLinks[i];
+            if (!l.source || !l.target) return;
+            t.setAttribute('x', (l.source.x + l.target.x) / 2);
+            t.setAttribute('y', (l.source.y + l.target.y) / 2);
+          });
+        });
+      } else {
+        sim.on('tick', tickFn);
+      }
+
+      return () => sim.stop();
+    }, [graph]);
+
+    // Build legend from actual edge types present
+    const legendColors = {
+      host_service: '#3b82f6', service_dependency: '#f97316', service_database: '#ef4444',
+      default_gateway: '#eab308', depends_on: '#8b5cf6', dns_resolver: '#22c55e',
+      connected_to: '#64748b', runs_on: '#ec4899',
+    };
+    const legendLabels = {
+      host_service: 'Serviço', service_dependency: 'Dependência', service_database: 'Database',
+      default_gateway: 'Gateway', depends_on: 'Depende', dns_resolver: 'DNS',
+      connected_to: 'Conectado', runs_on: 'Roda em',
+    };
+
+    const usedTypes = new Set(graph.links.map(l => l.type));
+    const legendEntries = [...usedTypes].filter(t => legendLabels[t]);
+
+    const legendEl = legendEntries.length > 0 ? e('div', { style:{ display:'flex', gap:12, flexWrap:'wrap', marginBottom:10, padding:'4px 0' } },
+      ...legendEntries.map(t =>
+        e('div', { key:t, style:{ display:'flex', alignItems:'center', gap:5, fontSize:'.72rem', color:'#8b949e' } },
+          e('span', { style:{ width:18, height:3, background:legendColors[t]||'#64748b', borderRadius:2, display:'inline-block' } }),
+          legendLabels[t] || t
+        )
+      )
+    ) : null;
+
+    if (graph.nodes.length === 0) {
+      return e('div', null,
+        e('h2', { style:{ fontSize:'1.1rem', margin:'0 0 12px' } }, 'Topologia Operacional'),
+        e('p', { style:{ color:'#8b949e', padding:'2.5rem', textAlign:'center', background:'#1c2128', border:'1px solid #30363d', borderRadius:10 } },
+          'Nenhum dado de topologia disponível. Execute uma varredura para descobrir relações entre ativos.'
+        )
+      );
+    }
+
+    return e('div', null,
+      e('div', { style:{ display:'flex', alignItems:'center', gap:8, marginBottom:10, flexWrap:'wrap' } },
+        e('h2', { style:{ fontSize:'1.1rem', margin:0, flex:1 } }, 'Topologia Operacional'),
+        e('span', { style:{ fontSize:'.78rem', color:'#64748b' } },
+          graph.nodes.length + ' nós  ·  ' + graph.links.length + ' arestas'
+        )
+      ),
+      legendEl,
+      e('div', { style:{ background:'#0d1117', border:'1px solid #30363d', borderRadius:10, overflow:'hidden' } },
+        e('svg', {
+          ref: svgRef,
+          style:{ width:'100%', height:'760px', display:'block' },
+          viewBox: '0 0 1000 760',
+          preserveAspectRatio: 'xMidYMid meet'
+        })
+      ),
+      e('div', { style:{ fontSize:'.7rem', color:'#475569', marginTop:6, textAlign:'center' } },
+        'Clique nos nós azuis para abrir o detalhe do ativo. ' +
+        (graph.links.length > 60 ? 'Labels de arestas ocultos para melhor legibilidade.' : '')
+      )
+    );
+  }
+
   // ── App principal ────────────────────────────────────────────────────────────
   function App() {
     const [tab, setTab] = React.useState('discovery');
@@ -1890,6 +2197,7 @@ const DISCOVERY_UI_HTML = `<!doctype html>
       { id:'targets',   label:'Targets' },
       { id:'assets',    label:'Ativos' },
       { id:'services',  label:'Serviços' },
+      { id:'topology',  label:'Topologia' },
     ];
 
     return e('div', { className:'wrap' },
@@ -1907,7 +2215,8 @@ const DISCOVERY_UI_HTML = `<!doctype html>
       tab === 'policies'  ? e(PoliciesTab,  { data, scope, reload:load }) : null,
       tab === 'targets'   ? e(TargetsTab,   { data, scope, reload:load }) : null,
       tab === 'assets'    ? e(AssetsTab,    { data, scope, reload:load }) : null,
-      tab === 'services' ? e(ServicesTab, { data, scope, reload:load }) : null
+      tab === 'services' ? e(ServicesTab, { data, scope, reload:load }) : null,
+      tab === 'topology' ? e(TopologyTab, { data, scope }) : null
     );
   }
 

@@ -19,6 +19,7 @@
     "@opentelemetry/sdk-logs": "^0.218.0",
     "@opentelemetry/sdk-node": "^0.218.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@results/auth": "file:../../../packages/auth",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.3.1",
