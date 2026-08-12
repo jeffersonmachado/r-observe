@@ -211,6 +211,25 @@ function createAISettingsService({
     }
   }
 
+  // Validação cacheada (TTL 5 min) para o status da UI sem chamar o provider a cada poll.
+  const keyStatusCache = new Map(); // `${provider}:${apiKey}` -> { result, at }
+
+  async function getProviderKeyStatus(provider, apiKey) {
+    if (!provider || provider === 'mock') return { status: 'mock' };
+    if (!apiKey) return { status: 'no_key' };
+    const cacheKey = `${provider}:${apiKey}`;
+    const cached = keyStatusCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 300000) return cached.result;
+    const v = await validateProviderKey(provider, apiKey);
+    const result = { status: v.valid ? 'ok' : 'invalid', detail: v.reason || null };
+    keyStatusCache.set(cacheKey, { result, at: Date.now() });
+    if (keyStatusCache.size > 20) {
+      const oldest = keyStatusCache.keys().next().value;
+      keyStatusCache.delete(oldest);
+    }
+    return result;
+  }
+
   return {
     proxyToAI,
     aiProxyFailureExtra,
@@ -220,6 +239,7 @@ function createAISettingsService({
     applyPersistedAISettingsOnStartup,
     reconcilePersistedAISettings,
     validateProviderKey,
+    getProviderKeyStatus,
   };
 }
 

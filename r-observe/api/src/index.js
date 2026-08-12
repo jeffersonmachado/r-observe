@@ -281,6 +281,7 @@ const {
   applyPersistedAISettingsOnStartup,
   reconcilePersistedAISettings,
   validateProviderKey,
+  getProviderKeyStatus,
 } = createAISettingsService({ db, log, logAIReconcileIssue, processEnv: process.env });
 
 const whatsappSettings = createWhatsAppSettingsService({ db, log });
@@ -1206,7 +1207,14 @@ app.get(`${BASE}/system/status`, requireAuth, async (_req, res) => {
         // status "IA Provider" da UI reflita o provider realmente ativo.
         const persistedAI = await getPersistedAISettings().catch(() => null);
         if (persistedAI) {
-          settings.ai = { ...(settings.ai || {}), provider: persistedAI.provider, model: persistedAI.model };
+          const keyStatus = await getProviderKeyStatus(persistedAI.provider, persistedAI.api_key).catch(() => ({ status: 'no_key' }));
+          settings.ai = {
+            ...(settings.ai || {}),
+            provider: persistedAI.provider,
+            model: persistedAI.model,
+            has_api_key: !!persistedAI.api_key,
+            key_status: keyStatus.status,
+          };
         }
         return settings;
       })(),
@@ -2942,11 +2950,15 @@ function loadStatus(){
     return r.json();
   }).then(d=>{
     const ai=d.ai||{};const ag=d.agents||{};const disc=d.discovery||{};const s=d.settings||{};
-    document.getElementById('st-ai').textContent=s.ai?.provider||'—';
+    const aiCls = s.ai?.key_status==='ok' ? 'ok' : (s.ai?.key_status==='invalid' ? 'err' : 'warn');
+    const stAi = document.getElementById('st-ai');
+    stAi.textContent = s.ai?.provider||'—';
+    const aiCard = stAi.closest('.status-card');
+    if (aiCard) aiCard.className = 'status-card ' + aiCls;
     document.getElementById('st-agents').textContent=(ag.online||0)+'/'+(ag.total||0);
     document.getElementById('st-assets').textContent=disc.total_assets||0;
     document.getElementById('sv-ai').textContent=s.ai?.provider||'—';
-    document.getElementById('sd-ai').className='dot '+(s.ai?.provider&&s.ai?.provider!=='mock'?'ok':'warn');
+    document.getElementById('sd-ai').className='dot '+aiCls;
     document.getElementById('sv-agents').textContent=(ag.online||0)+' online, '+(ag.offline||0)+' offline';
     document.getElementById('sd-agents').className='dot '+(ag.offline>0?'err':(ag.online>0?'ok':'warn'));
     document.getElementById('sv-assets').textContent=(disc.total_assets||0)+' ativos';
