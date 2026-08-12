@@ -1,19 +1,21 @@
-FROM node:20-alpine
+FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
 
 RUN apk add --no-cache wget
 
-WORKDIR /app
+WORKDIR /app/r-observe/ai
 
-COPY ai/package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY r-observe/r-observe/ai/package*.json ./
+COPY r-observe/packages/auth/ /app/packages/auth/
+RUN test -f package-lock.json && npm ci --omit=dev && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx
 
-COPY ai/src/   ./src/
-COPY shared/   ./shared/
+COPY r-observe/r-observe/ai/src/   ./src/
+COPY r-observe/r-observe/shared/   ./shared/
 
-RUN addgroup -S observe && adduser -S observe -G observe \
-    && chown -R observe:observe /app
+RUN chown -R node:node ./src ./shared package*.json
 
-USER observe
+USER node
 
 EXPOSE 3000
 

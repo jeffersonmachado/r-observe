@@ -139,12 +139,26 @@ describe('Event Processor', () => {
     assert.equal(updates.length, 1);
   });
 
+  it('check.recovery resolve somente o incidente do alvo recuperado', async () => {
+    await processor.processEvent(JSON.stringify({
+      type: 'check.recovery',
+      source: 'agent',
+      host: 'agent-01',
+      target: 'grafana',
+    }));
+
+    const update = db.queries.find(q =>
+      q.sql.includes('UPDATE observe_incidents') && q.sql.includes('resolved')
+    );
+    assert.deepEqual(update.params, ['host-uuid-1', '[CHECK.FAILED] agent-01 / grafana']);
+  });
+
   it('processEvent nao duplica incidente para mesmo host+tipo', async () => {
     // Mock para simular incidente existente
     const dbWithExisting = {
       queries: [],
       async query(sql, params = []) {
-        this.queries.push({ sql: sql.slice(0, 80), params });
+        this.queries.push({ sql, params });
         if (sql.includes('INSERT INTO observe_hosts') && sql.includes('ON CONFLICT')) {
           return { rows: [{ id: 'host-uuid-dup', inserted: true }], rowCount: 1 };
         }
@@ -172,6 +186,24 @@ describe('Event Processor', () => {
 
     const inserts = dbWithExisting.queries.filter(q => q.sql.includes('INSERT INTO observe_incidents'));
     assert.equal(inserts.length, 0);
+    const recurrenceUpdates = dbWithExisting.queries.filter(q =>
+      q.sql.includes('UPDATE observe_incidents') && q.sql.includes('repeat_count')
+    );
+    assert.equal(recurrenceUpdates.length, 1);
+  });
+
+  it('inclui o alvo do check na identidade semântica do incidente', async () => {
+    await processor.processEvent(JSON.stringify({
+      type: 'check.failed',
+      source: 'agent',
+      host: 'agent-01',
+      target: 'grafana',
+      id: 'evt-check-1',
+    }));
+
+    const inserts = db.queries.filter(q => q.sql.includes('INSERT INTO observe_incidents'));
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0].params[1], '[CHECK.FAILED] agent-01 / grafana');
   });
 
   it('processScanResults ignora payload invalido', async () => {

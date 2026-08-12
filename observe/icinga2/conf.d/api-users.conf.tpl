@@ -4,9 +4,6 @@
  *
  * ATENÇÃO: Não edite este arquivo manualmente em produção.
  * Defina ICINGA_API_USER e ICINGA_API_PASSWORD no .env.observe antes do deploy.
- *
- * O usuário root é criado SOMENTE se ICINGA_ROOT_PASSWORD estiver definido
- * (lógica no entrypoint.sh). Senha vazia nunca gera usuário root.
  */
 
 /* Usuário para IcingaWeb2 e R-Observe API */

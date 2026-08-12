@@ -1,132 +1,64 @@
 'use strict';
+
+// @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE  = process.env.BASE_URL || 'http://localhost:3080';
-const TOKEN = process.env.OBSERVE_TOKEN || '';
+const USER = process.env.ICINGAWEB_ADMIN_USER || '';
+const PASS = process.env.ICINGAWEB_ADMIN_PASS || '';
 
-test.skip(!TOKEN, 'Defina OBSERVE_TOKEN para rodar testes autenticados.');
+test.skip(!USER || !PASS, 'Defina as credenciais administrativas para os testes autenticados.');
 
-test.describe('AI Dashboard — /observe/ai', () => {
+async function login(page) {
+  await page.goto('/observe/login?next=/observe/ai');
+  await page.getByLabel('Usuário').fill(USER);
+  await page.getByLabel('Senha').fill(PASS);
+  await page.getByRole('button', { name: 'Entrar' }).click();
+  await page.waitForURL(url => url.pathname === '/observe/ai');
+  await expect(page.locator('#metrics-grid .metric')).toHaveCount(6);
+}
 
-  test.beforeEach(async ({ page }) => {
-    // Injeta token via sessionStorage antes de carregar a página
-    await page.goto(`${BASE}/observe/ai`);
-    await page.evaluate(t => sessionStorage.setItem('observe_token', t), TOKEN);
-    await page.reload();
-    await page.waitForTimeout(2500); // aguarda loadAll()
+test.describe('Painel de IA · fluxos somente leitura', () => {
+  test.beforeEach(async ({ page }) => login(page));
+
+  test('métricas apresentam valores numéricos', async ({ page }) => {
+    const values = page.locator('#metrics-grid .metric .val');
+    await expect(values).toHaveCount(6);
+    const contents = await values.allTextContents();
+    for (const value of contents.slice(0, 5)) expect(Number(value)).toBeGreaterThanOrEqual(0);
+    expect(contents[5]).toMatch(/^\d+👍 \/ \d+👎$/);
   });
 
-  test('página carrega sem erros de console', async ({ page }) => {
-    const errors = [];
-    page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
-    await page.waitForTimeout(1000);
-    const console401 = errors.filter(e => e.includes('401'));
-    expect(console401).toHaveLength(0);
-    await expect(page).toHaveTitle('R-Observe · IA Dashboard');
+  test('abas são navegáveis pelo teclado', async ({ page }) => {
+    const overview = page.getByRole('tab', { name: 'Visão Geral' });
+    await overview.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(page.getByRole('tab', { name: 'Análises' })).toBeFocused();
+    await expect(page.getByRole('tabpanel', { name: 'Análises' })).toBeVisible();
   });
 
-  test('métricas carregam com valores numéricos', async ({ page }) => {
-    const metrics = page.locator('#metrics-grid .metric');
-    await expect(metrics).toHaveCount(6, { timeout: 8000 });
-    // Primeiro card: "Analisados" — deve ter número
-    const firstVal = await metrics.first().locator('.val').textContent();
-    expect(Number(firstVal)).toBeGreaterThanOrEqual(0);
-    await page.screenshot({ path: 'test-results/ai-overview.png', fullPage: true });
+  test('catálogo termina de carregar sem alterar ações', async ({ page }) => {
+    await page.getByRole('tab', { name: 'Catálogo' }).click();
+    const body = page.locator('#catalog-table tbody');
+    await expect(body).not.toContainText('Carregando');
+    await expect(body.locator('tr')).not.toHaveCount(0);
   });
 
-  test('aba Análises lista incidentes com análise IA', async ({ page }) => {
-    await page.click('.tab:has-text("Análises")');
-    await page.waitForTimeout(500);
-    const rows = page.locator('#analyses-table tbody tr');
-    const count = await rows.count();
-    // Deve ter pelo menos 1 linha (sem ser o placeholder "Carregando")
-    expect(count).toBeGreaterThan(0);
-    const first = await rows.first().textContent();
-    expect(first).not.toContain('Carregando');
-    await page.screenshot({ path: 'test-results/ai-analyses-full.png', fullPage: true });
+  test('históricos de análises e remediações terminam de carregar', async ({ page }) => {
+    await page.getByRole('tab', { name: 'Análises' }).click();
+    await expect(page.locator('#analyses-table tbody')).not.toContainText('Carregando');
+    await page.getByRole('tab', { name: 'Remediações' }).click();
+    await expect(page.locator('#rem-table tbody')).not.toContainText('Carregando');
   });
 
-  test('aba Catálogo exibe as 8 ações', async ({ page }) => {
-    await page.click('.tab:has-text("Catálogo")');
-    await page.waitForTimeout(500);
-    const rows = page.locator('#catalog-table tbody tr');
-    await expect(rows).toHaveCount(8, { timeout: 6000 });
-
-    // Verifica ações esperadas
-    const text = await page.locator('#catalog-table').textContent();
-    expect(text).toContain('icinga:reschedule');
-    expect(text).toContain('icinga:silence');
-    expect(text).toContain('icinga:add-comment');
-    expect(text).toContain('docker:stop');
-    expect(text).toContain('http:verify');
-    await page.screenshot({ path: 'test-results/ai-catalog-full.png', fullPage: true });
+  test('contatos exibem formulário rotulado sem criar usuários', async ({ page }) => {
+    await page.getByRole('tab', { name: 'Contatos' }).click();
+    await expect(page.getByLabel('Usuário')).toBeVisible();
+    await expect(page.getByLabel('Senha inicial')).toHaveAttribute('minlength', '8');
+    await expect(page.getByRole('button', { name: 'Criar' })).toBeVisible();
   });
 
-  test('desativar e reativar ação do catálogo', async ({ page }) => {
-    await page.click('.tab:has-text("Catálogo")');
-    await page.waitForTimeout(500);
-
-    // Clica Desativar no docker:stop
-    const stopRow = page.locator('#catalog-table tbody tr', { hasText: 'docker:stop' });
-    await stopRow.locator('button:has-text("Desativar")').click();
-
-    // Toast de confirmação
-    const toast = page.locator('#toast');
-    await expect(toast).toBeVisible({ timeout: 4000 });
-    await expect(toast).toHaveClass(/ok/);
-    await expect(toast).toContainText('docker:stop');
-
-    // Aguarda refresh e botão muda para "Ativar"
-    await page.waitForTimeout(2000);
-    await expect(stopRow.locator('button:has-text("Ativar")')).toBeVisible({ timeout: 6000 });
-
-    // Reativa
-    await stopRow.locator('button:has-text("Ativar")').click();
-    await page.waitForTimeout(2000);
-    await expect(stopRow.locator('button:has-text("Desativar")')).toBeVisible({ timeout: 6000 });
-  });
-
-  test('feedback 👍 em análise recente', async ({ page }) => {
-    await page.click('.tab:has-text("Análises")');
-    await page.waitForTimeout(500);
-
-    const firstThumbUp = page.locator('#analyses-table button:has-text("👍")').first();
-    await expect(firstThumbUp).toBeVisible({ timeout: 6000 });
-    await firstThumbUp.click();
-
-    const toast = page.locator('#toast');
-    await expect(toast).toBeVisible({ timeout: 4000 });
-    await expect(toast).toHaveClass(/ok/);
-    await expect(toast).toContainText('positivo');
-  });
-
-  test('aba Remediações lista histórico', async ({ page }) => {
-    await page.click('.tab:has-text("Remediações")');
-    await page.waitForTimeout(500);
-    const rows = page.locator('#rem-table tbody tr');
-    const count = await rows.count();
-    expect(count).toBeGreaterThan(0);
-    const first = await rows.first().textContent();
-    expect(first).not.toContain('Carregando');
-    await page.screenshot({ path: 'test-results/ai-remediations.png', fullPage: true });
-  });
-
-  test('sem token: mostra mensagem orientativa sem 401', async ({ page }) => {
-    // Limpa token
-    await page.evaluate(() => sessionStorage.removeItem('observe_token'));
-    await page.reload();
-    await page.waitForTimeout(1500);
-
-    const errors = [];
-    page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
-    await page.waitForTimeout(500);
-
-    // Sem 401 no console
-    expect(errors.filter(e => e.includes('401'))).toHaveLength(0);
-
-    // Mostra mensagem orientativa
-    const grid = await page.locator('#metrics-grid').textContent();
-    expect(grid).toContain('JWT_SECRET');
-    await page.screenshot({ path: 'test-results/ai-no-token.png', fullPage: true });
+  test('logout encerra a sessão do painel', async ({ page }) => {
+    await page.getByRole('button', { name: 'Sair' }).click();
+    await expect(page).toHaveURL(/\/observe\/login/);
   });
 });

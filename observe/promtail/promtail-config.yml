@@ -18,6 +18,10 @@ scrape_configs:
   - job_name: containers
     pipeline_stages:
       - docker: {}
+      # Uma instalação nova não deve reenviar meses de logs Docker acumulados.
+      - drop:
+          older_than: 1h
+          drop_counter_reason: entry_too_old
       - json:
           expressions:
             service: service

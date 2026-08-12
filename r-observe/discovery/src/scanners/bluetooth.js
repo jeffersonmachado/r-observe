@@ -7,14 +7,14 @@
 // Requer: bluez, bluetoothctl, hcitool no host ou container com --privileged.
 // Alcance: limitado ao raio fisico do adaptador BT do host (~10-100m).
 
-const { exec } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const { log } = require('../utils/logger');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
-const SCAN_TIMEOUT_SEC = parseInt(process.env.DISCOVERY_BT_SCAN_TIMEOUT || '10', 10);
-const BLE_SCAN_DURATION = parseInt(process.env.DISCOVERY_BLE_SCAN_DURATION || '15', 10);
+const SCAN_TIMEOUT_SEC = Math.max(1, Math.min(60, parseInt(process.env.DISCOVERY_BT_SCAN_TIMEOUT || '10', 10) || 10));
+const BLE_SCAN_DURATION = Math.max(1, Math.min(60, parseInt(process.env.DISCOVERY_BLE_SCAN_DURATION || '15', 10) || 15));
 
 // ── Bluetooth Classic (hcitool scan) ─────────────────────────────────────
 
@@ -22,10 +22,9 @@ async function scanBluetoothClassic() {
   const devices = [];
   try {
     // hcitool scan: descobre dispositivos BT Classic visiveis
-    const { stdout } = await execAsync(
-      `timeout ${SCAN_TIMEOUT_SEC} hcitool scan 2>/dev/null`,
-      { timeout: (SCAN_TIMEOUT_SEC + 5) * 1000 }
-    );
+    const { stdout } = await execFileAsync('hcitool', ['scan'], {
+      timeout: SCAN_TIMEOUT_SEC * 1000,
+    });
 
     for (const line of stdout.split('\n')) {
       const m = line.match(/^\s*([0-9A-Fa-f:]{17})\s+(.+)$/);
@@ -51,10 +50,7 @@ async function scanBluetoothClassic() {
   // Enriquecer com info adicional (classe de dispositivo)
   for (const dev of devices) {
     try {
-      const { stdout } = await execAsync(
-        `hcitool info ${dev.mac} 2>/dev/null`,
-        { timeout: 5000 }
-      );
+      const { stdout } = await execFileAsync('hcitool', ['info', dev.mac], { timeout: 5000 });
       const nameMatch = stdout.match(/Device Name:\s*(.+)/);
       const classMatch = stdout.match(/Device Class:\s*(.+)/);
       if (nameMatch && !dev.name) dev.name = nameMatch[1].trim();
@@ -73,8 +69,8 @@ async function scanBle() {
 
   try {
     // hcitool lescan --duplicates para BLE (precisa de root/privileged)
-    const proc = exec(`timeout ${BLE_SCAN_DURATION} hcitool lescan --duplicates 2>/dev/null`, {
-      timeout: (BLE_SCAN_DURATION + 5) * 1000,
+    const proc = execFile('hcitool', ['lescan', '--duplicates'], {
+      timeout: BLE_SCAN_DURATION * 1000,
     });
 
     proc.stdout.on('data', (data) => {
@@ -120,20 +116,7 @@ async function scanWithBluetoothctl() {
 
   try {
     // bluetoothctl: mais informativo, mostra RSSI
-    const script = [
-      'power on',
-      'agent on',
-      'scan on',
-      `sleep ${BLE_SCAN_DURATION}`,
-      'scan off',
-      'devices',
-      'exit',
-    ].join('\n');
-
-    const { stdout } = await execAsync(
-      `echo "${script}" | bluetoothctl 2>/dev/null`,
-      { timeout: (BLE_SCAN_DURATION + 10) * 1000 }
-    );
+    const stdout = await runBluetoothctlScan(BLE_SCAN_DURATION);
 
     for (const line of stdout.split('\n')) {
       // "Device AA:BB:CC:DD:EE:FF Device Name"
@@ -157,10 +140,7 @@ async function scanWithBluetoothctl() {
     // Info detalhada de cada device
     for (const dev of devices) {
       try {
-        const { stdout: info } = await execAsync(
-          `bluetoothctl info ${dev.mac} 2>/dev/null`,
-          { timeout: 5000 }
-        );
+        const { stdout: info } = await execFileAsync('bluetoothctl', ['info', dev.mac], { timeout: 5000 });
         const rssiMatch = info.match(/RSSI:\s*(-?\d+)/);
         const classMatch = info.match(/Class:\s*(0x[0-9a-fA-F]+)/);
         const pairedMatch = info.match(/Paired:\s*(yes|no)/);
@@ -178,6 +158,29 @@ async function scanWithBluetoothctl() {
   }
 
   return devices;
+}
+
+function runBluetoothctlScan(durationSec) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('bluetoothctl', [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(stopTimer);
+      clearTimeout(killTimer);
+      if (err) reject(err); else resolve(stdout);
+    };
+    proc.stdout.on('data', data => { stdout += data.toString(); });
+    proc.stderr.on('data', data => { stderr += data.toString(); });
+    proc.once('error', finish);
+    proc.once('close', code => code === 0 ? finish() : finish(new Error(stderr || `bluetoothctl exited ${code}`)));
+    proc.stdin.write('power on\nagent on\nscan on\n');
+    const stopTimer = setTimeout(() => proc.stdin.end('scan off\ndevices\nexit\n'), durationSec * 1000);
+    const killTimer = setTimeout(() => proc.kill('SIGTERM'), (durationSec + 10) * 1000);
+  });
 }
 
 // ── OUI Vendor Lookup ────────────────────────────────────────────────────

@@ -15,22 +15,6 @@ find "${CONF_DIR}" -name "*.conf.tpl" | while read -r tmpl; do
   echo "[observe-entrypoint] Gerado: ${out}"
 done
 
-# Cria usuário root somente se ICINGA_ROOT_PASSWORD estiver definido e não-vazio.
-# Evita criar um ApiUser root com senha vazia, que permitiria acesso irrestrito.
-if [ -n "${ICINGA_ROOT_PASSWORD:-}" ]; then
-  cat >> "${CONF_DIR}/api-users.conf" <<EOF
-
-/* Usuário root — acesso total. Criado porque ICINGA_ROOT_PASSWORD foi definido. */
-object ApiUser "root" {
-  password = "${ICINGA_ROOT_PASSWORD}"
-  permissions = ["*"]
-}
-EOF
-  echo "[observe-entrypoint] Usuário root criado."
-else
-  echo "[observe-entrypoint] ICINGA_ROOT_PASSWORD não definido — usuário root omitido."
-fi
-
 # Valida a configuração antes de iniciar
 icinga2 daemon -C
 echo "[observe-entrypoint] Configuração validada. Iniciando daemon..."

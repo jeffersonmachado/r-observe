@@ -5,6 +5,13 @@
 // Suporta: AWS (EC2, RDS, ELB, ECS, Lambda), Azure (VMs), GCP (Compute).
 
 const { log } = require('../utils/logger');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
+
+function runCli(file, args, timeout) {
+  return execFileAsync(file, args, { timeout, maxBuffer: 16 * 1024 * 1024 });
+}
 
 // ── AWS ────────────────────────────────────────────────────────────────────
 const AWS_ENABLED = process.env.DISCOVERY_CLOUD_AWS_ENABLED === 'true';
@@ -70,14 +77,10 @@ async function discoverAwsEc2() {
 
   // Tenta AWS CLI primeiro
   try {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
-    const { stdout } = await execAsync(
-      `aws ec2 describe-instances --region ${AWS_REGION} --query 'Reservations[*].Instances[*]' --output json 2>/dev/null`,
-      { timeout: 30000 }
-    );
+    const { stdout } = await runCli('aws', [
+      'ec2', 'describe-instances', '--region', AWS_REGION,
+      '--query', 'Reservations[*].Instances[*]', '--output', 'json',
+    ], 30000);
     const instances = JSON.parse(stdout);
     if (!Array.isArray(instances)) return [];
 
@@ -108,14 +111,9 @@ async function discoverAwsRds() {
   if (!AWS_ENABLED) return [];
 
   try {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
-    const { stdout } = await execAsync(
-      `aws rds describe-db-instances --region ${AWS_REGION} --output json 2>/dev/null`,
-      { timeout: 20000 }
-    );
+    const { stdout } = await runCli('aws', [
+      'rds', 'describe-db-instances', '--region', AWS_REGION, '--output', 'json',
+    ], 20000);
     const data = JSON.parse(stdout);
     return (data.DBInstances || []).map(db => ({
       instance_id: db.DBInstanceIdentifier,
@@ -141,14 +139,9 @@ async function discoverAwsEcs() {
   if (!AWS_ENABLED) return [];
 
   try {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
-    const { stdout: clustersOut } = await execAsync(
-      `aws ecs list-clusters --region ${AWS_REGION} --output json 2>/dev/null`,
-      { timeout: 10000 }
-    );
+    const { stdout: clustersOut } = await runCli('aws', [
+      'ecs', 'list-clusters', '--region', AWS_REGION, '--output', 'json',
+    ], 10000);
     const { clusterArns } = JSON.parse(clustersOut);
 
     const resources = [];
@@ -157,10 +150,10 @@ async function discoverAwsEcs() {
 
       // Services
       try {
-        const { stdout: svcOut } = await execAsync(
-          `aws ecs list-services --cluster ${clusterName} --region ${AWS_REGION} --output json 2>/dev/null`,
-          { timeout: 10000 }
-        );
+        const { stdout: svcOut } = await runCli('aws', [
+          'ecs', 'list-services', '--cluster', clusterName,
+          '--region', AWS_REGION, '--output', 'json',
+        ], 10000);
         const { serviceArns } = JSON.parse(svcOut);
         for (const sArn of (serviceArns || [])) {
           resources.push({
@@ -188,14 +181,7 @@ async function discoverAzureVms() {
   if (!AZURE_ENABLED) return [];
 
   try {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
-    const { stdout } = await execAsync(
-      'az vm list --output json 2>/dev/null',
-      { timeout: 30000 }
-    );
+    const { stdout } = await runCli('az', ['vm', 'list', '--output', 'json'], 30000);
     const vms = JSON.parse(stdout);
     if (!Array.isArray(vms)) return [];
 
@@ -221,16 +207,11 @@ async function discoverGcpCompute() {
   if (!GCP_ENABLED) return [];
 
   try {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
     // Tenta listar instancias em todos os projetos/zones
     // gcloud compute instances list --format json
-    const { stdout } = await execAsync(
-      'gcloud compute instances list --format json 2>/dev/null',
-      { timeout: 30000 }
-    );
+    const { stdout } = await runCli('gcloud', [
+      'compute', 'instances', 'list', '--format', 'json',
+    ], 30000);
     const instances = JSON.parse(stdout);
     if (!Array.isArray(instances)) return [];
 

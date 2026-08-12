@@ -7,7 +7,10 @@ Guia operacional curto para evolucao de schema no `r-observe`.
 - O acesso ao PostgreSQL usa `Sequelize` como client.
 - A execucao de migrations usa `Umzug`.
 - As migrations ficam versionadas em `r-observe/migrations/*.sql`.
-- Os runners oficiais estao em `r-observe/api/src/migrate.js` e `r-observe/discovery/src/migrate.js`.
+- O runner oficial e `r-observe/api/src/db-bootstrap.js`, executado pelo servico
+  one-shot `r-observe-db-bootstrap`.
+- API, Worker e Discovery usam a role runtime `observe_app`, sem privilegios de
+  DDL, `SUPERUSER` ou `BYPASSRLS`.
 
 ## Regra de ouro
 
@@ -42,7 +45,8 @@ Guia operacional curto para evolucao de schema no `r-observe`.
 1. Escrever a migration em `r-observe/migrations/`.
 2. Revisar impacto em constraints, FKs e volume de dados historicos.
 3. Validar em transacao com `BEGIN ... ROLLBACK` quando a migration permitir.
-4. Executar localmente pelo runner oficial ou via `psql` controlado em ambiente de validacao.
+4. Executar localmente pelo bootstrap oficial ou via `psql` administrativo
+   controlado em ambiente de validacao.
 5. Registrar o contrato na documentacao se a mudanca alterar comportamento operacional.
 
 ## Validacao local
@@ -50,34 +54,41 @@ Guia operacional curto para evolucao de schema no `r-observe`.
 Para ensaio sem persistir mudancas:
 
 ```bash
-cd /opt/results/r-observe
+cd /opt/results/ria/r-observe
 { printf 'BEGIN;\n'; cat r-observe/migrations/006_discovery_logical_asset_dedupe.sql; printf '\nROLLBACK;\n'; } \
   | docker exec -i r-observe-postgres psql -v ON_ERROR_STOP=1 -U observe -d observedb
 ```
 
-Para aplicar uma migration SQL diretamente no banco local:
+Para aplicar uma migration SQL diretamente no banco local (somente diagnostico
+ou recuperacao administrativa):
 
 ```bash
-cd /opt/results/r-observe
+cd /opt/results/ria/r-observe
 docker exec -i r-observe-postgres psql -v ON_ERROR_STOP=1 -U observe -d observedb \
   < r-observe/migrations/006_discovery_logical_asset_dedupe.sql
 ```
 
 ## Execucao pelo runner oficial
 
-API:
+Na stack Docker, execute o bootstrap one-shot. Ele aplica migrations e depois
+reconcilia as permissoes da role runtime:
 
 ```bash
-cd /opt/results/r-observe/r-observe/api
-node src/migrate.js
+cd /opt/results/ria/r-observe
+docker compose -f docker-compose.observe.yml --env-file .env.observe \
+  --profile observe-core up --no-deps --force-recreate r-observe-db-bootstrap
 ```
 
-Discovery:
+O comando deve terminar com codigo `0` e a mensagem `Database ready`. Somente
+depois disso os servicos persistentes devem ser atualizados:
 
 ```bash
-cd /opt/results/r-observe/r-observe/discovery
-node src/migrate.js
+docker compose -f docker-compose.observe.yml --env-file .env.observe \
+  --profile observe-core up -d --no-build r-observe-api r-observe-worker r-observe-discovery
 ```
+
+Nao execute `src/migrate.js` dentro da API persistente: ela nao recebe
+credenciais administrativas por projeto.
 
 ## Checklist de review
 
@@ -89,6 +100,6 @@ node src/migrate.js
 
 ## Referencias
 
+- `r-observe/api/src/db-bootstrap.js`
 - `r-observe/api/src/migrate.js`
-- `r-observe/discovery/src/migrate.js`
 - `docs/r-observe-discovery/05-database.md`

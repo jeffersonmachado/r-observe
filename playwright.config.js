@@ -16,6 +16,14 @@ module.exports = defineConfig({
     video: 'off',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+          ? { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } }
+          : {}),
+      },
+    },
   ],
 });

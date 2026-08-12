@@ -1,0 +1,19 @@
+{
+  "name": "@results/auth",
+  "version": "0.1.0",
+  "description": "Results Auth — Autenticação centralizada para R-Observe",
+  "private": true,
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.3"
+  },
+  "peerDependencies": {
+    "express": ">=4 <6"
+  }
+}

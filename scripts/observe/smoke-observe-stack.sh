@@ -6,7 +6,7 @@
 #
 # Pré-requisitos:
 #   - Stack observe-core (+ observe-ai para step 5) rodando
-#   - JWT_SECRET definido ou passado via --token
+#   - Chave privada RS256 disponível ou token passado via --token
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 
@@ -24,6 +24,10 @@ section() { echo -e "\n${BLUE}═══ $1 ═══${NC}"; }
 step()    { echo -e "${BLUE}[STEP $1]${NC} $2"; }
 
 FAILURES=0
+KEEP_DATA=false
+EVENT_ID=""
+INCIDENT_ID=""
+SMOKE_HOST=""
 
 resolve_observe_http_port() {
   local from_env_file
@@ -41,23 +45,23 @@ resolve_observe_http_port() {
 # ─── Argumentos ───────────────────────────────────────────────────────────────
 API_URL="${API_URL:-http://localhost:$(resolve_observe_http_port)}"
 API_BASE="${R_OBSERVE_API_BASE_PATH:-/observe/api}"
-_SECRET="${JWT_SECRET:-}"
 _TOKEN_ARG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --api-url) API_URL="$2"; shift 2 ;;
     --token)   _TOKEN_ARG="$2"; shift 2 ;;
+    --keep-data) KEEP_DATA=true; shift ;;
     *) shift ;;
   esac
 done
 
 if [[ -n "$_TOKEN_ARG" ]]; then
   TOKEN="$_TOKEN_ARG"
-elif [[ -n "$_SECRET" ]]; then
-  TOKEN="$(node "${ROOT_DIR}/scripts/observe/jwt-sign.js" smoke-observe-stack 30m)"
 else
-  TOKEN=""
+  TOKEN="$(JWT_ROLE='admin' \
+    JWT_SCOPE='api:access api:events:write api:remediation:write api:inventory:write' \
+    node "${ROOT_DIR}/scripts/observe/jwt-sign.js" smoke-observe-stack 30m)"
 fi
 
 BASE="${API_URL}${API_BASE}"
@@ -69,6 +73,37 @@ smoke_curl() {
   curl -sf --max-time 10 -H "Content-Type: application/json" \
        ${TOKEN:+-H "x-internal-token: ${TOKEN}"} "$@" "$url"
 }
+
+cleanup_smoke_data() {
+  [[ "$KEEP_DATA" == "true" || -z "$EVENT_ID" || -z "$SMOKE_HOST" ]] && return
+  [[ "$EVENT_ID" =~ ^smoke-test-[0-9]+$ && "$SMOKE_HOST" =~ ^smoke-test-host-[0-9]+$ ]] || {
+    warn "Cleanup recusado: identificadores sintéticos inválidos"
+    return
+  }
+  if ! docker inspect r-observe-postgres >/dev/null 2>&1; then
+    warn "Cleanup automático indisponível sem o container PostgreSQL local; use --keep-data para suprimir este aviso"
+    return
+  fi
+
+  local cleanup_sql host_response
+  cleanup_sql="DELETE FROM observe_incidents
+    WHERE source_event_id = '${EVENT_ID}'
+      AND host_id IN (SELECT id FROM observe_hosts WHERE name = '${SMOKE_HOST}');"
+  if ! printf '%s\n' "$cleanup_sql" | docker exec -i r-observe-postgres \
+      psql -v ON_ERROR_STOP=1 -U "${OBSERVE_DB_USER:-observe}" -d "${OBSERVE_DB_NAME:-observedb}" >/dev/null; then
+    warn "Falha ao remover incidentes sintéticos do PostgreSQL"
+    return
+  fi
+
+  host_response="$(smoke_curl "${BASE}/hosts/${SMOKE_HOST}" -X DELETE 2>/dev/null || true)"
+  if echo "$host_response" | grep -Eq '"removed":true|Host não encontrado'; then
+    pass "Cleanup removeu incidentes, remediações, timeline e host sintéticos"
+  else
+    warn "Incidentes sintéticos removidos; cleanup do host não foi confirmado"
+  fi
+}
+
+trap cleanup_smoke_data EXIT
 
 # ─── Step 1: API health ───────────────────────────────────────────────────────
 section "Smoke Test de Incidente (10 steps)"
@@ -102,11 +137,12 @@ fi
 step 3 "Agente detecta container parado e envia evento"
 
 EVENT_ID="smoke-test-$(date +%s)"
+SMOKE_HOST="smoke-test-host-${EVENT_ID##*-}"
 EVENT_PAYLOAD="{
   \"type\": \"container.stopped\",
   \"id\": \"${EVENT_ID}\",
   \"source\": \"r-observe-agent\",
-  \"host\": \"smoke-test-host\",
+  \"host\": \"${SMOKE_HOST}\",
   \"address\": \"127.0.0.1\",
   \"severity\": \"warning\",
   \"service\": \"test-container\",
@@ -128,7 +164,6 @@ step 4 "Aguardando worker processar o evento (até 15s)"
 
 MAX_WAIT=15
 WAITED=0
-INCIDENT_ID=""
 
 while [ $WAITED -lt $MAX_WAIT ]; do
   INCIDENTS=$(smoke_curl "${BASE}/incidents" 2>/dev/null || echo "{}")

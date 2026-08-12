@@ -118,10 +118,16 @@ function recommend(message) {
   });
   if (!fs.existsSync(envFile_)) recommend('Copy .env.observe.example to .env.observe and fill in values');
 
-  for (const key of ['JWT_SECRET', 'OBSERVE_DB_NAME', 'OBSERVE_DB_USER', 'OBSERVE_DB_PASSWORD']) {
+  for (const key of ['OBSERVE_DB_NAME', 'OBSERVE_DB_USER', 'OBSERVE_DB_PASSWORD']) {
     const present = !!env[key];
     if (!present) recommend(`Set ${key} in .env.observe`);
     check(`env ${key}`, present, { required: true });
+  }
+  for (const service of ['api', 'worker', 'agent', 'discovery', 'automation']) {
+    for (const kind of ['private', 'public']) {
+      const keyPath = path.join(root, 'secrets', `jwt_${service}_${kind}.pem`);
+      check(`JWT ${service} ${kind} key`, fs.existsSync(keyPath), { path: keyPath, required: true });
+    }
   }
   check('env OBSERVE_REDIS_PASSWORD optional', true, {
     required: false,

@@ -18,8 +18,8 @@ DB_NAME="${OBSERVE_DB_NAME:-observedb}"
 DB_USER="${OBSERVE_DB_USER:-observe}"
 DB_PASSWORD="${OBSERVE_DB_PASSWORD:-}"
 REDIS_PORT="${OBSERVE_REDIS_PORT:-6379}"
-_SECRET="${JWT_SECRET:-}"
-TOKEN="$(node "${ROOT_DIR}/scripts/observe/jwt-sign.js" smoke-real 15m)"
+TOKEN="$(JWT_AUDIENCE=discovery JWT_SCOPE='discovery:access discovery:write' JWT_TENANT_ID=discovery-smoke-real node "${ROOT_DIR}/scripts/observe/jwt-sign.js" smoke-real 15m)"
+SMOKE_EDGE="smoke-real-$(date +%s)-$$"
 REPORT="dist/discovery-smoke-real.json"
 DISCOVERY_PID=""
 API_PID=""
@@ -107,22 +107,14 @@ db_count() {
 
 redis_llen() {
   local rhost="${REDIS_HOST:-127.0.0.1}"
-  if [[ -n "${OBSERVE_REDIS_PASSWORD:-}" ]]; then
-    redis-cli -h "$rhost" -p "$REDIS_PORT" -a "$OBSERVE_REDIS_PASSWORD" LLEN "$1" 2>/dev/null | tr -d '[:space:]'
-  else
-    redis-cli -h "$rhost" -p "$REDIS_PORT" LLEN "$1" 2>/dev/null | tr -d '[:space:]'
-  fi
+  REDISCLI_AUTH="${OBSERVE_REDIS_PASSWORD:-}" redis-cli -h "$rhost" -p "$REDIS_PORT" LLEN "$1" 2>/dev/null | tr -d '[:space:]'
 }
 
 # Contador monotônico de eventos publicados (não consumido pelo worker)
 redis_events_total() {
   local rhost="${REDIS_HOST:-127.0.0.1}"
   local val
-  if [[ -n "${OBSERVE_REDIS_PASSWORD:-}" ]]; then
-    val="$(redis-cli -h "$rhost" -p "$REDIS_PORT" -a "$OBSERVE_REDIS_PASSWORD" GET observe:events:published:total 2>/dev/null | tr -d '[:space:]')"
-  else
-    val="$(redis-cli -h "$rhost" -p "$REDIS_PORT" GET observe:events:published:total 2>/dev/null | tr -d '[:space:]')"
-  fi
+  val="$(REDISCLI_AUTH="${OBSERVE_REDIS_PASSWORD:-}" redis-cli -h "$rhost" -p "$REDIS_PORT" GET observe:events:published:total 2>/dev/null | tr -d '[:space:]')"
   echo "${val:-0}"
 }
 
@@ -144,7 +136,10 @@ EVENTS_BEFORE="$(redis_events_total || echo 0)"
 
 if ! http_get "http://127.0.0.1:3010/health" >/dev/null 2>&1; then
   DB_HOST="$DB_HOST" DB_PORT="$DB_PORT" DB_NAME="$DB_NAME" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" \
-  REDIS_URL="redis://:${OBSERVE_REDIS_PASSWORD:-}@${REDIS_HOST:-127.0.0.1}:${REDIS_PORT}" JWT_SECRET="${_SECRET}" \
+  REDIS_URL="redis://:${OBSERVE_REDIS_PASSWORD:-}@${REDIS_HOST:-127.0.0.1}:${REDIS_PORT}" \
+  JWT_PRIVATE_KEY_FILE="${JWT_DISCOVERY_PRIVATE_KEY_FILE:-$ROOT_DIR/secrets/jwt_discovery_private.pem}" \
+  JWT_KEY_ID=discovery JWT_SIGNING_SERVICE=discovery \
+  JWT_PUBLIC_KEY_FILES="api=$ROOT_DIR/secrets/jwt_api_public.pem,discovery=$ROOT_DIR/secrets/jwt_discovery_public.pem,automation=$ROOT_DIR/secrets/jwt_automation_public.pem" \
   DISCOVERY_SCAN_QUEUE_ENABLED=false DISCOVERY_PASSIVE_LISTENERS_ENABLED=false PORT=3010 \
   node r-observe/discovery/src/index.js >/tmp/r-observe-discovery-smoke-real.log 2>&1 &
   DISCOVERY_PID="$!"
@@ -154,7 +149,10 @@ ok "Discovery API health"
 
 if ! http_get "http://127.0.0.1:3009/observe/api/health" >/dev/null 2>&1; then
   DB_HOST="$DB_HOST" DB_PORT="$DB_PORT" DB_NAME="$DB_NAME" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" \
-  REDIS_URL="redis://:${OBSERVE_REDIS_PASSWORD:-}@${REDIS_HOST:-127.0.0.1}:${REDIS_PORT}" JWT_SECRET="${_SECRET}" \
+  REDIS_URL="redis://:${OBSERVE_REDIS_PASSWORD:-}@${REDIS_HOST:-127.0.0.1}:${REDIS_PORT}" \
+  JWT_PRIVATE_KEY_FILE="${JWT_API_PRIVATE_KEY_FILE:-$ROOT_DIR/secrets/jwt_api_private.pem}" \
+  JWT_KEY_ID=api JWT_SIGNING_SERVICE=api \
+  JWT_PUBLIC_KEY_FILES="agent=$ROOT_DIR/secrets/jwt_agent_public.pem,automation=$ROOT_DIR/secrets/jwt_automation_public.pem" \
   DISCOVERY_SERVICE_URL=http://127.0.0.1:3010 DISCOVERY_PROXY_ORIGIN=http://127.0.0.1:3010 \
   AI_PROVIDER=mock AI_SERVICE_URL=http://127.0.0.1:3011 AI_SETTINGS_RECONCILE_STRICT=false \
   OBSERVE_BOOTSTRAP_GRAFANA_ADMIN_ENABLED=false PORT=3009 \
@@ -164,7 +162,7 @@ fi
 wait_http "http://127.0.0.1:3009/observe/api/health" || fail "API health"
 ok "API health"
 
-SCAN_BODY='{"profile":"safe","trigger":"discovery-smoke-real","tenant_id":"default","site_id":"default-site","edge_id":"central","targets":[{"address":"127.0.0.1","discovery_type":"ip"}]}'
+SCAN_BODY="{\"profile\":\"safe\",\"trigger\":\"discovery-smoke-real\",\"site_id\":\"default-site\",\"edge_id\":\"${SMOKE_EDGE}\",\"targets\":[{\"address\":\"127.0.0.1\",\"discovery_type\":\"ip\"}]}"
 SCAN_RESP="$(http_post "http://127.0.0.1:3010/api/discovery/scan" "$SCAN_BODY")" || fail "scan safe localhost"
 echo "$SCAN_RESP" | grep -q '"run_id"\|"queued"' || fail "scan safe localhost"
 ok "scan safe localhost"
@@ -172,7 +170,7 @@ ok "scan safe localhost"
 if ip addr show docker0 >/dev/null 2>&1; then
   BRIDGE_IP="$(ip -4 addr show docker0 | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)"
   if [[ -n "$BRIDGE_IP" ]]; then
-    http_post "http://127.0.0.1:3010/api/discovery/scan" "{\"profile\":\"safe\",\"trigger\":\"discovery-smoke-real-bridge\",\"targets\":[{\"address\":\"${BRIDGE_IP}\",\"discovery_type\":\"ip\"}]}" >/dev/null || fail "scan safe docker bridge"
+    http_post "http://127.0.0.1:3010/api/discovery/scan" "{\"profile\":\"safe\",\"trigger\":\"discovery-smoke-real-bridge\",\"site_id\":\"default-site\",\"edge_id\":\"${SMOKE_EDGE}-bridge\",\"targets\":[{\"address\":\"${BRIDGE_IP}\",\"discovery_type\":\"ip\"}]}" >/dev/null || fail "scan safe docker bridge"
     ok "scan safe docker bridge"
   else
     ok "docker bridge ausente com justificativa"

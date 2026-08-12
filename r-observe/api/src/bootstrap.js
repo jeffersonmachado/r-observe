@@ -153,13 +153,13 @@ async function bootstrapInitialUsers(pool, env = process.env, logger = console) 
         if (exists.rowCount) {
           await pool.query(`
             UPDATE icingaweb_user
-            SET "active" = $2, "password_hash" = convert_to(crypt($3, gen_salt('bf')), 'UTF8'), "mtime" = NOW()
+            SET "active" = $2, "password_hash" = convert_to(crypt($3, gen_salt('bf', 12)), 'UTF8'), "mtime" = NOW()
             WHERE lower("name") = lower($1::text)
           `, [user.name, user.active, user.password]);
         } else {
           await pool.query(`
             INSERT INTO icingaweb_user ("name", "active", "password_hash", "ctime", "mtime")
-            VALUES ($1::varchar, $2::smallint, convert_to(crypt($3::text, gen_salt('bf')), 'UTF8'), NOW(), NOW())
+            VALUES ($1::varchar, $2::smallint, convert_to(crypt($3::text, gen_salt('bf', 12)), 'UTF8'), NOW(), NOW())
           `, [user.name, user.active, user.password]);
         }
       } else {
@@ -170,7 +170,7 @@ async function bootstrapInitialUsers(pool, env = process.env, logger = console) 
         if (!exists.rowCount) {
           await pool.query(`
             INSERT INTO icingaweb_user ("name", "active", "password_hash", "ctime", "mtime")
-            VALUES ($1::varchar, $2::smallint, convert_to(crypt($3::text, gen_salt('bf')), 'UTF8'), NOW(), NOW())
+            VALUES ($1::varchar, $2::smallint, convert_to(crypt($3::text, gen_salt('bf', 12)), 'UTF8'), NOW(), NOW())
           `, [user.name, user.active, user.password]);
         }
       }

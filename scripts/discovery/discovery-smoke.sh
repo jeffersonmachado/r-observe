@@ -16,13 +16,16 @@ DISCOVERY_CONTAINER="r-observe-discovery"
 REDIS_CONTAINER="r-observe-redis"
 PG_CONTAINER="r-observe-postgres"
 API_CONTAINER="r-observe-api"
-_SECRET="${JWT_SECRET:-}"
 DB_USER="${OBSERVE_DB_USER:-observe}"
 DB_NAME="${OBSERVE_DB_NAME:-observedb}"
 
 ok() { echo "[PASS] $1"; }
 ko() { echo "[FAIL] $1" >&2; FAIL=1; }
 info() { echo "[INFO] $1"; }
+
+redis_cli() {
+  docker exec -e REDISCLI_AUTH="${OBSERVE_REDIS_PASSWORD:-}" "$REDIS_CONTAINER" redis-cli "$@"
+}
 
 FAIL=0
 
@@ -79,25 +82,29 @@ else
   ko "endpoint /api/discovery/health não respondeu corretamente"
 fi
 
-if [[ -z "$_SECRET" ]]; then
-  ko "JWT_SECRET não definido para smoke autenticado"
-  echo "Defina token no .env.observe" >&2
-  exit 1
-fi
-TOKEN="$(node "${ROOT_DIR}/scripts/observe/jwt-sign.js" discovery-smoke 15m)"
+TOKEN="$(JWT_AUDIENCE=discovery JWT_SCOPE='discovery:access discovery:write' JWT_TENANT_ID=discovery-smoke node "${ROOT_DIR}/scripts/observe/jwt-sign.js" discovery-smoke 15m)"
 
 RUNS_BEFORE="$(baseline_count observe_discovery_runs || echo 0)"
 FINDINGS_BEFORE="$(baseline_count observe_discovery_findings || echo 0)"
 FINDING_EPOCH_BEFORE="$(baseline_finding_epoch || echo 0)"
 ASSETS_BEFORE="$(baseline_count observe_assets || echo 0)"
 ASSET_EPOCH_BEFORE="$(baseline_asset_epoch || echo 0)"
-EVENTS_BEFORE="$(docker exec "$REDIS_CONTAINER" redis-cli LLEN observe:events 2>/dev/null | tr -d '[:space:]' || echo 0)"
+EVENTS_BEFORE="$(redis_cli LLEN observe:events 2>/dev/null | tr -d '[:space:]' || echo 0)"
 
 TMP_SUB="$(mktemp)"
 set +e
-docker exec "$REDIS_CONTAINER" sh -lc "timeout 6 redis-cli --raw PSUBSCRIBE observe.discovery.started observe.discovery.completed" > "$TMP_SUB" 2>/dev/null &
+docker exec -e REDISCLI_AUTH="${OBSERVE_REDIS_PASSWORD:-}" "$REDIS_CONTAINER" \
+  sh -lc "timeout 20 redis-cli --raw SUBSCRIBE observe.discovery.started observe.discovery.completed" > "$TMP_SUB" 2>/dev/null &
 SUB_PID=$!
 set -e
+
+# Evita perder eventos rápidos: só dispara o scan depois que o Redis confirma
+# que o subscriber já está registrado nos dois canais.
+for _subscriber_wait in 1 2 3 4 5; do
+  SUBSCRIBERS="$(redis_cli PUBSUB NUMSUB observe.discovery.started observe.discovery.completed 2>/dev/null | awk 'NR % 2 == 0 { total += $1 } END { print total + 0 }')"
+  if [[ "$SUBSCRIBERS" -ge 2 ]]; then break; fi
+  sleep 1
+done
 
 # POST scan (direto no container, sem depender do observe-proxy)
 set +e
@@ -123,7 +130,7 @@ for _i in 1 2 3 4 5; do
   FINDING_EPOCH_AFTER="$(baseline_finding_epoch || echo 0)"
   ASSET_COUNT="$(baseline_count observe_assets || echo 0)"
   ASSET_EPOCH_AFTER="$(baseline_asset_epoch || echo 0)"
-  EVENT_LIST_LEN="$(docker exec "$REDIS_CONTAINER" redis-cli LLEN observe:events 2>/dev/null | tr -d '[:space:]' || echo 0)"
+  EVENT_LIST_LEN="$(redis_cli LLEN observe:events 2>/dev/null | tr -d '[:space:]' || echo 0)"
   if [[ "$RUN_COUNT" -gt "$RUNS_BEFORE" ]] && { [[ "$FINDING_COUNT" -gt "$FINDINGS_BEFORE" ]] || [[ "$FINDING_EPOCH_AFTER" -gt "$FINDING_EPOCH_BEFORE" ]]; } && { [[ "$ASSET_COUNT" -gt "$ASSETS_BEFORE" ]] || [[ "$ASSET_EPOCH_AFTER" -gt "$ASSET_EPOCH_BEFORE" ]]; }; then
     break
   fi
@@ -156,8 +163,8 @@ else
 fi
 
 # eventos redis started/completed
-STARTED_EVT="$(docker exec "$REDIS_CONTAINER" redis-cli PUBSUB NUMSUB observe.discovery.started 2>/dev/null | tr '\n' ' ')"
-COMPLETED_EVT="$(docker exec "$REDIS_CONTAINER" redis-cli PUBSUB NUMSUB observe.discovery.completed 2>/dev/null | tr '\n' ' ')"
+STARTED_EVT="$(redis_cli PUBSUB NUMSUB observe.discovery.started 2>/dev/null | tr '\n' ' ')"
+COMPLETED_EVT="$(redis_cli PUBSUB NUMSUB observe.discovery.completed 2>/dev/null | tr '\n' ' ')"
 set +e
 wait "$SUB_PID"
 set -e

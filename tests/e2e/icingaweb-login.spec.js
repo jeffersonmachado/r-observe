@@ -11,7 +11,7 @@ test('IcingaWeb2 — login admin e acesso ao dashboard', async ({ page }) => {
   await page.goto(`${BASE_URL}/icinga/`);
 
   // Aguarda a página de login carregar
-  await expect(page).toHaveTitle(/Icinga Web 2 Login/, { timeout: 15000 });
+  await expect(page).toHaveTitle(/(?:R-Observe Monitor|Icinga Web 2) Login/, { timeout: 15000 });
 
   // Preenche credenciais
   await page.fill('input[name="username"]', ICINGA_USER);
@@ -29,5 +29,5 @@ test('IcingaWeb2 — login admin e acesso ao dashboard', async ({ page }) => {
   console.log('URL após login:', page.url());
 
   expect(page.url()).not.toContain('/authentication/login');
-  expect(title).not.toBe('Icinga Web 2 Login');
+  expect(title).not.toMatch(/(?:R-Observe Monitor|Icinga Web 2) Login/);
 });

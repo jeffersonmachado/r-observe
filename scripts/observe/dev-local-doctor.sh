@@ -16,10 +16,14 @@ set -a
 . "$ENV_FILE"
 set +a
 
-if [ -z "${JWT_SECRET:-}" ]; then
-  echo "[dev-local-doctor] ❌ JWT_SECRET não definido em .env.observe"
-  exit 1
-fi
+for service in api worker agent discovery automation; do
+  for kind in private public; do
+    if [ ! -f "$ROOT_DIR/secrets/jwt_${service}_${kind}.pem" ]; then
+      echo "[dev-local-doctor] ❌ Keyring JWT incompleto; execute scripts/observe/jwt-keys.sh init"
+      exit 1
+    fi
+  done
+done
 
 if [ -z "${OBSERVE_DB_PASSWORD:-}" ]; then
   echo "[dev-local-doctor] ❌ OBSERVE_DB_PASSWORD não definido em .env.observe"

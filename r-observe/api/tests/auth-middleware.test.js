@@ -13,11 +13,16 @@ process.env.JWT_PUBLIC_KEY = publicKey;
 
 const assert = require('node:assert/strict');
 const { describe, it, beforeEach } = require('node:test');
-const jwt = require('jsonwebtoken');
+const { createJwtHelpers } = require('@results/auth');
 const { createAuthMiddleware } = require('../src/middleware/auth');
 
+const jwtHelpers = createJwtHelpers({
+  JWT_PRIVATE_KEY: privateKey,
+  JWT_PUBLIC_KEY: publicKey,
+});
+
 function signToken(claims = {}) {
-  return jwt.sign({ sub: 'svc', role: 'admin', ...claims }, privateKey, { algorithm: 'RS256', expiresIn: '5m' });
+  return jwtHelpers.signInternalToken({ sub: 'svc', role: 'admin', ...claims });
 }
 
 function mockDb(rows = []) {
@@ -100,6 +105,22 @@ describe('Auth Middleware', () => {
     assert.equal(req.auth.role, 'admin');
   });
 
+  it('JWT sem role recebe privilégio mínimo e preserva tenant autenticado', async () => {
+    const token = jwtHelpers.signInternalToken({
+      sub: 'r-observe-discovery',
+      tenant_id: 'tenant-a',
+      scope: 'discovery:read',
+    });
+    const req = mockReq({ token });
+    const res = mockRes();
+
+    await auth.requireAuth(req, res, () => {});
+
+    assert.equal(req.auth.role, 'operator');
+    assert.equal(req.auth.tenantId, 'tenant-a');
+    assert.equal(req.auth.scope, 'discovery:read');
+  });
+
   it('requireAuth rejeita token nao-JWT (sem fallback raw)', async () => {
     const req = mockReq({ token: 'qualquer-segredo-raw' });
     const res = mockRes();
@@ -117,7 +138,10 @@ describe('Auth Middleware', () => {
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       publicKeyEncoding: { type: 'spki', format: 'pem' },
     });
-    const forged = jwt.sign({ sub: 'x', role: 'admin' }, other.privateKey, { algorithm: 'RS256', expiresIn: '5m' });
+    const forged = createJwtHelpers({
+      JWT_PRIVATE_KEY: other.privateKey,
+      JWT_PUBLIC_KEY: other.publicKey,
+    }).signInternalToken({ sub: 'x', role: 'admin' });
     const req = mockReq({ token: forged });
     const res = mockRes();
     let nextCalled = false;

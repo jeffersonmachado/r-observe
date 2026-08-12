@@ -27,15 +27,14 @@ RUNNING_CONTAINERS=$(docker compose -f "$COMPOSE_FILE" $COMPOSE_ARGS ps --format
 
 check_container() {
   local name="$1"
-  local container_info
-  container_info=$(docker inspect "$name" 2>/dev/null || echo "")
-  if [ -z "$container_info" ]; then
+  local state health
+  state=$(docker inspect --format='{{.State.Status}}' "$name" 2>/dev/null || echo "missing")
+  health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$name" 2>/dev/null || echo "none")
+
+  if [[ "$state" == "missing" ]]; then
     warn "Container não encontrado: $name (profile pode não estar ativo)"
     return
   fi
-  local state health
-  state=$(echo "$container_info" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['State']['Status'])" 2>/dev/null || echo "unknown")
-  health=$(echo "$container_info" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('State',{}).get('Health',{}).get('Status','none'))" 2>/dev/null || echo "none")
 
   if [ "$state" = "running" ] && ([ "$health" = "healthy" ] || [ "$health" = "none" ]); then
     pass "$name (state=$state, health=$health)"
@@ -77,28 +76,12 @@ check_endpoint() {
   fi
 }
 
-# API direta
-check_endpoint "r-observe-api /health"   "http://localhost:3000/observe/api/health" 2>/dev/null || true
-
-# Via proxy (se ativo)
+# Serviços internos não publicam portas no host por desenho. A saúde deles já
+# foi verificada pelos healthchecks dos containers acima; daqui em diante são
+# testados apenas os endpoints realmente expostos pelo proxy.
 if docker inspect r-observe-proxy >/dev/null 2>&1; then
   check_endpoint "proxy /observe/api/health" "${BASE_URL}/observe/api/health"
   check_endpoint "proxy /observe/proxy/health" "${BASE_URL}/observe/proxy/health"
-fi
-
-# Prometheus
-if docker inspect r-observe-prometheus >/dev/null 2>&1; then
-  check_endpoint "Prometheus /-/healthy" "http://localhost:9090/-/healthy"
-fi
-
-# Loki
-if docker inspect r-observe-loki >/dev/null 2>&1; then
-  check_endpoint "Loki /ready" "http://localhost:3100/ready"
-fi
-
-# Grafana
-if docker inspect r-observe-grafana >/dev/null 2>&1; then
-  check_endpoint "Grafana /api/health" "http://localhost:3000/api/health" 2>/dev/null || true
 fi
 
 # ─── Resultado ────────────────────────────────────────────────────────────────

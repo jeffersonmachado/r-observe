@@ -27,8 +27,8 @@
 x-logging: &default-logging
   driver: json-file
   options:
-    max-size: "${OBSERVE_LOG_MAX_SIZE:-50m}"
-    max-file: "${OBSERVE_LOG_MAX_FILE:-5}"
+    max-size: "${OBSERVE_LOG_MAX_SIZE:-10m}"
+    max-file: "${OBSERVE_LOG_MAX_FILE:-2}"
 
 x-common: &common
   restart: unless-stopped
@@ -41,9 +41,15 @@ services:
   # ─── POSTGRESQL ─────────────────────────────────────────────────────────────
   r-observe-postgres:
     <<: *common
-    image: postgres:16-alpine
+    build:
+      context: ./observe/postgres
     container_name: r-observe-postgres
     profiles: [observe-core]
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
     environment:
       POSTGRES_DB: ${OBSERVE_DB_NAME:-observedb}
       POSTGRES_USER: ${OBSERVE_DB_USER:-observe}
@@ -71,9 +77,14 @@ services:
   # ─── REDIS (R-Observe) ───────────────────────────────────────────────────────
   r-observe-redis:
     <<: *common
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     container_name: r-observe-redis
     profiles: [observe-core]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
     command:
       - redis-server
       - "--save"
@@ -98,6 +109,32 @@ services:
       retries: 5
       start_period: 10s
 
+  # ─── DATABASE BOOTSTRAP (ONE-SHOT) ─────────────────────────────────────────
+  r-observe-db-bootstrap:
+    <<: *common
+    restart: "no"
+    build:
+      context: ..
+      dockerfile: r-observe/r-observe/api/Dockerfile
+    container_name: r-observe-db-bootstrap
+    profiles: [observe-core]
+    depends_on:
+      r-observe-postgres:
+        condition: service_healthy
+    command: ["node", "src/db-bootstrap.js"]
+    environment:
+      DB_HOST: r-observe-postgres
+      DB_PORT: 5432
+      DB_NAME: ${OBSERVE_DB_NAME:-observedb}
+      DB_USER: ${OBSERVE_DB_APP_USER:-observe_app}
+      DB_PASSWORD: ${OBSERVE_DB_APP_PASSWORD:-${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}}
+      DB_ADMIN_USER: ${OBSERVE_DB_USER:-observe}
+      DB_ADMIN_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      DB_EXPORTER_USER: ${OBSERVE_DB_EXPORTER_USER:-observe_exporter}
+      DB_EXPORTER_PASSWORD: ${OBSERVE_DB_EXPORTER_PASSWORD:-${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}}
+    networks:
+      - observe-internal
+
   # ─── R-OBSERVE API ───────────────────────────────────────────────────────────
   r-observe-api:
     <<: *common
@@ -106,14 +143,25 @@ services:
       dockerfile: r-observe/r-observe/api/Dockerfile
     container_name: r-observe-api
     profiles: [observe-core]
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
     depends_on:
       r-observe-postgres:
         condition: service_healthy
       r-observe-redis:
         condition: service_healthy
+      r-observe-db-bootstrap:
+        condition: service_completed_successfully
     secrets:
-      - jwt_private
-      - jwt_public
+      - source: jwt_api_private
+        target: jwt_private
+      - source: jwt_agent_public
+        target: jwt_agent_public
+      - source: jwt_automation_public
+        target: jwt_automation_public
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
@@ -121,12 +169,29 @@ services:
       DB_HOST: r-observe-postgres
       DB_PORT: 5432
       DB_NAME: ${OBSERVE_DB_NAME:-observedb}
-      DB_USER: ${OBSERVE_DB_USER:-observe}
-      DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      DB_USER: ${OBSERVE_DB_APP_USER:-observe_app}
+      DB_PASSWORD: ${OBSERVE_DB_APP_PASSWORD:-${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}}
       REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
+      OBSERVE_LOGIN_MAX_ATTEMPTS: ${OBSERVE_LOGIN_MAX_ATTEMPTS:-5}
+      OBSERVE_LOGIN_WINDOW_SECONDS: ${OBSERVE_LOGIN_WINDOW_SECONDS:-900}
+      OBSERVE_LOGIN_LOCK_SECONDS: ${OBSERVE_LOGIN_LOCK_SECONDS:-900}
+      OBSERVE_RATE_LIMIT_WINDOW_MS: ${OBSERVE_RATE_LIMIT_WINDOW_MS:-60000}
+      OBSERVE_RATE_LIMIT_API_MAX: ${OBSERVE_RATE_LIMIT_API_MAX:-300}
+      OBSERVE_RATE_LIMIT_EVENTS_MAX: ${OBSERVE_RATE_LIMIT_EVENTS_MAX:-100}
       TENANT_MODE: ${R_OBSERVE_TENANT_MODE:-multi}
       JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
-      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public
+      JWT_PUBLIC_KEY_FILES: agent=/run/secrets/jwt_agent_public,automation=/run/secrets/jwt_automation_public
+      JWT_ISSUER: ${JWT_ISSUER:-r-observe}
+      JWT_AUDIENCE: api
+      JWT_REQUIRED_SCOPES: api:access
+      JWT_ALLOWED_SERVICES: agent,automation
+      JWT_REQUIRE_JTI: "true"
+      JWT_MAX_LIFETIME: 30m
+      JWT_CLOCK_TOLERANCE_SECONDS: "5"
+      JWT_SIGNING_SERVICE: api
+      JWT_ALLOWED_AUDIENCES: ai,discovery
+      JWT_ALLOWED_SIGNING_SCOPES: ai:access,ai:settings:write,discovery:access,discovery:write
+      JWT_MAX_SIGNING_ROLE: operator
       WEBHOOK_SECRET: ${OBSERVE_WEBHOOK_SECRET:-}
       AI_SERVICE_URL: http://r-observe-ai:3000
       DISCOVERY_SERVICE_URL: http://r-observe-discovery:3010
@@ -138,6 +203,8 @@ services:
       ICINGA_API_URL: ${ICINGA_API_URL:-https://r-observe-icinga2:5665}
       ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
       ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:-}
+      ICINGA_API_TLS_REJECT_UNAUTHORIZED: ${ICINGA_API_TLS_REJECT_UNAUTHORIZED:-true}
+      ICINGA_API_CA_FILE: ${ICINGA_API_CA_FILE:-}
       ICINGAWEB_ADMIN_USER: ${ICINGAWEB_ADMIN_USER:-admin}
       ICINGAWEB_ADMIN_PASS: ${ICINGAWEB_ADMIN_PASS:-}
       OBSERVE_INITIAL_USERS_JSON: ${OBSERVE_INITIAL_USERS_JSON:-}
@@ -148,7 +215,8 @@ services:
       OTEL_SERVICE_VERSION: "0.1.0"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
-      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.02"
       OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
     volumes:
       - observe-evidence:/app/data/evidence
@@ -171,10 +239,15 @@ services:
   r-observe-worker:
     <<: *common
     build:
-      context: ./r-observe
-      dockerfile: worker/Dockerfile
+      context: ..
+      dockerfile: r-observe/r-observe/worker/Dockerfile
     container_name: r-observe-worker
     profiles: [observe-core]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     depends_on:
       r-observe-postgres:
         condition: service_healthy
@@ -183,17 +256,23 @@ services:
       r-observe-api:
         condition: service_healthy
     secrets:
-      - jwt_private
+      - source: jwt_worker_private
+        target: jwt_private
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
       DB_HOST: r-observe-postgres
       DB_PORT: 5432
       DB_NAME: ${OBSERVE_DB_NAME:-observedb}
-      DB_USER: ${OBSERVE_DB_USER:-observe}
-      DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      DB_USER: ${OBSERVE_DB_APP_USER:-observe_app}
+      DB_PASSWORD: ${OBSERVE_DB_APP_PASSWORD:-${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}}
       REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
       JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
+      JWT_ISSUER: ${JWT_ISSUER:-r-observe}
+      JWT_SIGNING_SERVICE: worker
+      JWT_ALLOWED_AUDIENCES: ai
+      JWT_ALLOWED_SIGNING_SCOPES: ai:access,ai:explain
+      JWT_MAX_SIGNING_ROLE: operator
       API_URL: http://r-observe-api:3000
       AI_SERVICE_URL: http://r-observe-ai:3000
       AI_ENABLED: ${R_OBSERVE_AI_ENABLED:-true}
@@ -216,7 +295,8 @@ services:
       OTEL_SERVICE_VERSION: "0.1.0"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
-      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.02"
       OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
     volumes:
       - observe-evidence:/app/data/evidence
@@ -239,12 +319,22 @@ services:
   r-observe-ai:
     <<: *common
     build:
-      context: ./r-observe
-      dockerfile: ai/Dockerfile
+      context: ..
+      dockerfile: r-observe/r-observe/ai/Dockerfile
     container_name: r-observe-ai
     profiles: [observe-ai]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
     secrets:
-      - jwt_public
+      - source: jwt_api_public
+        target: jwt_api_public
+      - source: jwt_worker_public
+        target: jwt_worker_public
+      - source: jwt_discovery_public
+        target: jwt_discovery_public
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
@@ -253,7 +343,14 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AI_TIMEOUT_MS: ${R_OBSERVE_AI_TIMEOUT_MS:-30000}
-      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public
+      JWT_PUBLIC_KEY_FILES: api=/run/secrets/jwt_api_public,worker=/run/secrets/jwt_worker_public,discovery=/run/secrets/jwt_discovery_public
+      JWT_ISSUER: ${JWT_ISSUER:-r-observe}
+      JWT_AUDIENCE: ai
+      JWT_REQUIRED_SCOPES: ai:access
+      JWT_ALLOWED_SERVICES: api,worker,discovery
+      JWT_REQUIRE_JTI: "true"
+      JWT_MAX_LIFETIME: 30m
+      JWT_CLOCK_TOLERANCE_SECONDS: "5"
       LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
       TZ: ${TZ:-America/Sao_Paulo}
       # ── OpenTelemetry ──────────────────────────────────────────────────────
@@ -261,7 +358,8 @@ services:
       OTEL_SERVICE_VERSION: "0.4.0"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
-      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.02"
       OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
     dns:
       - 8.8.8.8
@@ -282,19 +380,30 @@ services:
   r-observe-agent:
     <<: *common
     build:
-      context: ./r-observe
-      dockerfile: agent/Dockerfile
+      context: ..
+      dockerfile: r-observe/r-observe/agent/Dockerfile
     container_name: r-observe-agent
     profiles: [observe-agent]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
     depends_on:
       r-observe-api:
         condition: service_healthy
     secrets:
-      - jwt_private
+      - source: jwt_agent_private
+        target: jwt_private
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
       JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
+      JWT_ISSUER: ${JWT_ISSUER:-r-observe}
+      JWT_SIGNING_SERVICE: agent
+      JWT_ALLOWED_AUDIENCES: api
+      JWT_ALLOWED_SIGNING_SCOPES: api:access,api:events:write,api:inventory:write
+      JWT_MAX_SIGNING_ROLE: admin
       API_URL: ${OBSERVE_AGENT_API_URL:-http://r-observe-api:3000}
       API_BASE_PATH: ${R_OBSERVE_API_BASE_PATH:-/observe/api}
       CHECK_INTERVAL_MS: ${OBSERVE_AGENT_CHECK_INTERVAL_MS:-60000}
@@ -316,10 +425,13 @@ services:
       OTEL_SERVICE_VERSION: "0.1.0"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
-      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.02"
       OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    group_add:
+      - "${DOCKER_SOCKET_GID:-137}"
     tmpfs:
       - /tmp
     networks:
@@ -338,10 +450,15 @@ services:
   r-observe-discovery:
     <<: *common
     build:
-      context: ./r-observe
-      dockerfile: discovery/Dockerfile
+      context: ..
+      dockerfile: r-observe/r-observe/discovery/Dockerfile
     container_name: r-observe-discovery
     profiles: [observe-core, observe-discovery]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     user: "${OBSERVE_DISCOVERY_UID:-1000}:${OBSERVE_DISCOVERY_GID:-1000}"
     depends_on:
       r-observe-postgres:
@@ -351,23 +468,49 @@ services:
       r-observe-api:
         condition: service_healthy
     secrets:
-      - jwt_private
-      - jwt_public
+      - source: jwt_discovery_private
+        target: jwt_private
+      - source: jwt_api_public
+        target: jwt_api_public
+      - source: jwt_discovery_public
+        target: jwt_discovery_public
+      - source: jwt_automation_public
+        target: jwt_automation_public
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3010
       DB_HOST: r-observe-postgres
       DB_PORT: 5432
       DB_NAME: ${OBSERVE_DB_NAME:-observedb}
-      DB_USER: ${OBSERVE_DB_USER:-observe}
-      DB_PASSWORD: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      DB_USER: ${OBSERVE_DB_APP_USER:-observe_app}
+      DB_PASSWORD: ${OBSERVE_DB_APP_PASSWORD:-${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}}
       REDIS_URL: redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379
       JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private
-      JWT_PUBLIC_KEY_FILE: /run/secrets/jwt_public
+      JWT_PUBLIC_KEY_FILES: api=/run/secrets/jwt_api_public,discovery=/run/secrets/jwt_discovery_public,automation=/run/secrets/jwt_automation_public
+      JWT_ISSUER: ${JWT_ISSUER:-r-observe}
+      JWT_AUDIENCE: discovery
+      JWT_REQUIRED_SCOPES: discovery:access
+      JWT_ALLOWED_SERVICES: api,discovery,automation
+      JWT_REQUIRE_JTI: "true"
+      JWT_MAX_LIFETIME: 30m
+      JWT_CLOCK_TOLERANCE_SECONDS: "5"
+      JWT_SIGNING_SERVICE: discovery
+      JWT_ALLOWED_AUDIENCES: ai,discovery
+      JWT_ALLOWED_SIGNING_SCOPES: ai:access,discovery:access,discovery:write
+      JWT_MAX_SIGNING_ROLE: operator
       LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
       DISCOVERY_SD_FILE: /app/data/sd/discovery-engine.json
       DISCOVERY_DOCKER_ENABLED: ${DISCOVERY_DOCKER_ENABLED:-true}
       DISCOVERY_SCAN_QUEUE_ENABLED: ${DISCOVERY_SCAN_QUEUE_ENABLED:-true}
+      DISCOVERY_PASSIVE_MAX_ASSETS: ${DISCOVERY_PASSIVE_MAX_ASSETS:-5000}
+      DISCOVERY_PASSIVE_MAX_PACKET_BYTES: ${DISCOVERY_PASSIVE_MAX_PACKET_BYTES:-8192}
+      DISCOVERY_PASSIVE_RATE_PER_MINUTE: ${DISCOVERY_PASSIVE_RATE_PER_MINUTE:-600}
+      DISCOVERY_RETENTION_ENABLED: ${DISCOVERY_RETENTION_ENABLED:-true}
+      DISCOVERY_RETENTION_METRICS_DAYS: ${DISCOVERY_RETENTION_METRICS_DAYS:-30}
+      DISCOVERY_RETENTION_HISTORY_DAYS: ${DISCOVERY_RETENTION_HISTORY_DAYS:-90}
+      DISCOVERY_RETENTION_FINDINGS_DAYS: ${DISCOVERY_RETENTION_FINDINGS_DAYS:-90}
+      DISCOVERY_RETENTION_CHANGES_DAYS: ${DISCOVERY_RETENTION_CHANGES_DAYS:-180}
+      DISCOVERY_RETENTION_BATCH_SIZE: ${DISCOVERY_RETENTION_BATCH_SIZE:-5000}
       # ── Enterprise Discovery Scanners ──────────────────────────────────────
       DISCOVERY_PING_SWEEP_ENABLED: ${DISCOVERY_PING_SWEEP_ENABLED:-false}
       DISCOVERY_IPV6_ENABLED: ${DISCOVERY_IPV6_ENABLED:-false}
@@ -384,7 +527,7 @@ services:
       # ── Scan tuning ────────────────────────────────────────────────────────
       DISCOVERY_EXTRA_PORTS: ${DISCOVERY_EXTRA_PORTS:-}
       DISCOVERY_SCAN_PARALLEL: ${DISCOVERY_SCAN_PARALLEL:-20}
-      DISCOVERY_KNOWLEDGE_DIR: ${DISCOVERY_KNOWLEDGE_DIR:-/app/knowledge}
+      DISCOVERY_KNOWLEDGE_DIR: ${DISCOVERY_KNOWLEDGE_DIR:-/app/r-observe/discovery/knowledge}
       DISCOVERY_KNOWLEDGE_HOT_RELOAD: ${DISCOVERY_KNOWLEDGE_HOT_RELOAD:-true}
       # ── ARP auto-scan ──────────────────────────────────────────────────────
       DISCOVERY_ARP_ENABLED: ${DISCOVERY_ARP_ENABLED:-true}
@@ -393,15 +536,13 @@ services:
       ICINGA_API_URL: ${ICINGA_API_URL:-https://r-observe-icinga2:5665}
       ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
       ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:-}
-      ICINGA_API_ADMIN_USER: ${ICINGA_API_ADMIN_USER:-root}
-      ICINGA_API_ADMIN_PASSWORD: ${ICINGA_API_ADMIN_PASSWORD:-${ICINGA_ROOT_PASSWORD:-}}
-      ICINGA_ROOT_PASSWORD: ${ICINGA_ROOT_PASSWORD:-}
       TZ: ${TZ:-America/Sao_Paulo}
       OTEL_SERVICE_NAME: r-observe-discovery
       OTEL_SERVICE_VERSION: "0.1.0"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://r-observe-otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
-      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.02"
       OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
     volumes:
       - ./observe/prometheus/sd:/app/data/sd
@@ -425,9 +566,14 @@ services:
   # ─── REDIS dedicado Icinga (IcingaDB) ────────────────────────────────────────
   r-observe-icinga-redis:
     <<: *common
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     container_name: r-observe-icinga-redis
     profiles: [observe-icinga]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 64M
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     tmpfs:
       - /data
@@ -448,6 +594,11 @@ services:
       context: ./observe/icinga2
     container_name: r-observe-icinga2
     profiles: [observe-icinga]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 512M
     depends_on:
       r-observe-icinga-redis:
         condition: service_healthy
@@ -455,7 +606,6 @@ services:
       ICINGA_MASTER: 1
       ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
       ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:?ICINGA_API_PASSWORD obrigatório}
-      ICINGA_ROOT_PASSWORD: ${ICINGA_ROOT_PASSWORD:-}
       ICINGA_REDIS_HOST: r-observe-icinga-redis
       ICINGA_REDIS_PORT: 6379
       TZ: ${TZ:-America/Sao_Paulo}
@@ -480,9 +630,15 @@ services:
   # ─── ICINGA DB ───────────────────────────────────────────────────────────────
   r-observe-icingadb:
     <<: *common
-    image: icinga/icingadb:1.5.1
+    build:
+      context: ./observe/icingadb
     container_name: r-observe-icingadb
     profiles: [observe-icinga]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     depends_on:
       r-observe-postgres:
         condition: service_healthy
@@ -507,7 +663,7 @@ services:
       - observe-monitoring
       - observe-internal
     healthcheck:
-      disable: true
+      test: ["CMD", "/bin/icingadb", "--version"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -516,9 +672,15 @@ services:
   # ─── ICINGA WEB 2 ────────────────────────────────────────────────────────────
   r-observe-icingaweb2:
     <<: *common
-    image: icinga/icingaweb2:2.12
+    build:
+      context: ./observe/icingaweb2
     container_name: r-observe-icingaweb2
     profiles: [observe-icinga]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       r-observe-icinga2:
         condition: service_healthy
@@ -526,6 +688,8 @@ services:
         condition: service_started
       r-observe-postgres:
         condition: service_healthy
+      r-observe-db-bootstrap:
+        condition: service_completed_successfully
     environment:
       # ── IcingaWeb2 base ─────────────────────────────────────────────────────
       icingaweb.enabledModules: icingadb
@@ -543,8 +707,8 @@ services:
       icingaweb.resources.icingaweb2.host: r-observe-postgres
       icingaweb.resources.icingaweb2.port: "5432"
       icingaweb.resources.icingaweb2.dbname: ${OBSERVE_DB_NAME:-observedb}
-      icingaweb.resources.icingaweb2.username: ${OBSERVE_DB_USER:-observe}
-      icingaweb.resources.icingaweb2.password: ${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}
+      icingaweb.resources.icingaweb2.username: ${OBSERVE_DB_APP_USER:-observe_app}
+      icingaweb.resources.icingaweb2.password: ${OBSERVE_DB_APP_PASSWORD:-${OBSERVE_DB_PASSWORD:?OBSERVE_DB_PASSWORD obrigatório}}
 
       # ── Autenticação: backend db usando resource icingaweb2 ──────────────────
       icingaweb.authentication.icingaweb2.backend: db
@@ -589,9 +753,14 @@ services:
   # ─── PROMETHEUS ──────────────────────────────────────────────────────────────
   r-observe-prometheus:
     <<: *common
-    image: prom/prometheus:v2.52.0
+    image: prom/prometheus:v3.13.1-distroless@sha256:214f8427c8fba80c327bb94a75feb802ae12f2d6ca30812aa6e7d22f09bbea80
     container_name: r-observe-prometheus
     profiles: [observe-monitoring]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 512M
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -612,7 +781,7 @@ services:
       - observe-monitoring
       - observe-internal
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --tries=1 -O /dev/null http://127.0.0.1:9090/prometheus/-/healthy || exit 1"]
+      test: ["CMD", "/bin/promtool", "query", "instant", "http://127.0.0.1:9090/prometheus", "up"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -621,9 +790,15 @@ services:
   # ─── LOKI ────────────────────────────────────────────────────────────────────
   r-observe-loki:
     <<: *common
-    image: grafana/loki:2.9.8
+    build:
+      context: ./observe/loki
     container_name: r-observe-loki
     profiles: [observe-monitoring]
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
     command: ["-config.file=/etc/loki/loki-config.yml"]
     volumes:
       - r-observe-loki-data:/loki
@@ -633,25 +808,29 @@ services:
     networks:
       - observe-monitoring
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready | grep -q 'ready' || exit 1"]
+      test: ["CMD", "/usr/bin/loki", "-config.file=/etc/loki/loki-config.yml", "-verify-config=true"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 30s
 
-  # ─── PROMTAIL (coleta logs Docker → Loki) ────────────────────────────────────
-  r-observe-promtail:
+  # ─── GRAFANA ALLOY (coleta logs Docker → Loki) ──────────────────────────────
+  r-observe-alloy:
     <<: *common
-    image: grafana/promtail:2.9.8
-    container_name: r-observe-promtail
+    build:
+      context: ./observe/alloy
+    container_name: r-observe-alloy
     profiles: [observe-monitoring]
-    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
     volumes:
-      - ./observe/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./observe/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /var/log:/var/log:ro
-      - r-observe-promtail-positions:/positions
+      - r-observe-alloy-data:/var/lib/alloy/data
     tmpfs:
       - /tmp
     networks:
@@ -660,7 +839,7 @@ services:
       r-observe-loki:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "sh", "-c", "kill -0 1"]
+      test: ["CMD", "/bin/alloy", "fmt", "--test", "/etc/alloy/config.alloy"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -669,9 +848,15 @@ services:
   # ─── GRAFANA ─────────────────────────────────────────────────────────────────
   r-observe-grafana:
     <<: *common
-    image: grafana/grafana:10.4.3
+    build:
+      context: ./observe/grafana
     container_name: r-observe-grafana
     profiles: [observe-monitoring]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     depends_on:
       r-observe-prometheus:
         condition: service_healthy
@@ -685,6 +870,11 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
       GF_LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-warn}
       TZ: ${TZ:-America/Sao_Paulo}
     volumes:
@@ -706,9 +896,14 @@ services:
   # ─── OPENTELEMETRY COLLECTOR ─────────────────────────────────────────────────
   r-observe-otel-collector:
     <<: *common
-    image: otel/opentelemetry-collector-contrib:0.101.0
+    image: otel/opentelemetry-collector-contrib:0.158.0@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
     container_name: r-observe-otel-collector
     profiles: [observe-monitoring]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
     command: ["--config=/etc/otel-collector-config.yml"]
     volumes:
       - ./observe/otel/otel-collector-config.yml:/etc/otel-collector-config.yml:ro
@@ -718,14 +913,23 @@ services:
       - observe-monitoring
       - observe-internal
     healthcheck:
-      disable: true
+      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otel-collector-config.yml"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   # ─── NGINX REVERSE PROXY ─────────────────────────────────────────────────────
   r-observe-proxy:
     <<: *common
-    image: nginx:1.25-alpine
+    image: nginx:1.30.4-alpine3.24@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
     container_name: r-observe-proxy
     profiles: [r-observe-proxy]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
     depends_on:
       r-observe-api:
         condition: service_healthy
@@ -734,6 +938,7 @@ services:
     volumes:
       - ./observe/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./observe/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./observe/nginx/results-brand:/etc/nginx/results-brand:ro
     tmpfs:
       - /tmp
       - /var/cache/nginx
@@ -751,28 +956,48 @@ services:
   # ─── POSTGRES EXPORTER ────────────────────────────────────────────────────────
   r-observe-postgres-exporter:
     <<: *common
-    image: prometheuscommunity/postgres-exporter:latest
+    build:
+      context: ./observe/postgres-exporter
     container_name: r-observe-postgres-exporter
     profiles: [observe-monitoring]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 64M
     environment:
-      DATA_SOURCE_NAME: "postgresql://${OBSERVE_DB_USER}:${OBSERVE_DB_PASSWORD}@r-observe-postgres:5432/${OBSERVE_DB_NAME:-observedb}?sslmode=disable"
+      DATA_SOURCE_NAME: "postgresql://${OBSERVE_DB_EXPORTER_USER:-observe_exporter}:${OBSERVE_DB_EXPORTER_PASSWORD:-${OBSERVE_DB_PASSWORD}}@r-observe-postgres:5432/${OBSERVE_DB_NAME:-observedb}?sslmode=disable"
     depends_on:
       r-observe-postgres:
         condition: service_healthy
+      r-observe-db-bootstrap:
+        condition: service_completed_successfully
     tmpfs:
       - /tmp
     networks:
       - observe-internal
       - observe-monitoring
 
+    healthcheck:
+      test: ["CMD", "/bin/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # ─── REDIS EXPORTER ──────────────────────────────────────────────────────────
   r-observe-redis-exporter:
     <<: *common
-    image: oliver006/redis_exporter:latest
+    image: oliver006/redis_exporter:v1.88.0@sha256:2c8c55c63ce4d915389f03d337b8acef56aaaca9fab8728291287e612d4d6398
     container_name: r-observe-redis-exporter
     profiles: [observe-monitoring]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 64M
     environment:
-      REDIS_ADDR: "redis://r-observe-redis:6379"
+      REDIS_ADDR: "redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379"
     depends_on:
       r-observe-redis:
         condition: service_healthy
@@ -781,13 +1006,32 @@ services:
     networks:
       - observe-internal
       - observe-monitoring
+    healthcheck:
+      test: ["CMD", "/redis_exporter", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # ─── SNMP EXPORTER (camada física L1) ────────────────────────────────────────
+  # Ativo porém limitado em recursos (0.1 CPU / 64 MB). Sem alvos no file_sd o
+  # exporter permanece ocioso; quando houver targets SNMP, coleta com este teto.
   r-observe-snmp-exporter:
     <<: *common
-    image: prom/snmp-exporter:v0.26.0
+    build:
+      context: ./observe/snmp-exporter
     container_name: r-observe-snmp-exporter
     profiles: [observe-monitoring, observe-discovery]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 64M
+    command:
+      - --config.file=/etc/snmp_exporter/snmp.yml
+      - --config.expand-environment-variables
+    environment:
+      SNMP_COMMUNITY: ${SNMP_COMMUNITY:-public}
     volumes:
       - ./observe/prometheus/snmp.yml:/etc/snmp_exporter/snmp.yml:ro
     tmpfs:
@@ -795,13 +1039,35 @@ services:
     networks:
       - observe-internal
       - observe-monitoring
+    healthcheck:
+      test: ["CMD", "/bin/snmp_exporter", "--config.file=/etc/snmp_exporter/snmp.yml", "--config.expand-environment-variables", "--dry-run"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
 
 # ─── VOLUMES ─────────────────────────────────────────────────────────────────
 secrets:
-  jwt_private:
-    file: ./secrets/jwt_private.pem
-  jwt_public:
-    file: ./secrets/jwt_public.pem
+  jwt_api_private:
+    file: ./secrets/jwt_api_private.pem
+  jwt_api_public:
+    file: ./secrets/jwt_api_public.pem
+  jwt_worker_private:
+    file: ./secrets/jwt_worker_private.pem
+  jwt_worker_public:
+    file: ./secrets/jwt_worker_public.pem
+  jwt_agent_private:
+    file: ./secrets/jwt_agent_private.pem
+  jwt_agent_public:
+    file: ./secrets/jwt_agent_public.pem
+  jwt_discovery_private:
+    file: ./secrets/jwt_discovery_private.pem
+  jwt_discovery_public:
+    file: ./secrets/jwt_discovery_public.pem
+  jwt_automation_private:
+    file: ./secrets/jwt_automation_private.pem
+  jwt_automation_public:
+    file: ./secrets/jwt_automation_public.pem
 
 volumes:
   r-observe-postgres-data:
@@ -815,8 +1081,7 @@ volumes:
   observe-evidence:
   observe-replays:
   observe-logs:
-  observe-config:
-  r-observe-promtail-positions:
+  r-observe-alloy-data:
 
 # ─── NETWORKS ────────────────────────────────────────────────────────────────
 networks:

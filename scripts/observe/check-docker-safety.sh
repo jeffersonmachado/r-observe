@@ -24,41 +24,33 @@ COMPOSE_FULL=$(docker compose -f "$COMPOSE_FILE" $COMPOSE_ARGS config 2>/dev/nul
 
 # ─── Banco de dados ────────────────────────────────────────────────────────────
 section "Banco de dados"
-docker inspect observe-postgres >/dev/null 2>&1 && {
-  PORTS=$(docker inspect observe-postgres | python3 -c "import sys,json; d=json.load(sys.stdin); ports=d[0].get('NetworkSettings',{}).get('Ports',{}); print(next(iter(ports),None))" 2>/dev/null || echo "")
-  HOST_BIND=$(docker inspect observe-postgres | python3 -c "import sys,json; d=json.load(sys.stdin); ports=d[0].get('NetworkSettings',{}).get('Ports',{}); binds=list(ports.values()); print(binds[0][0]['HostIp'] if binds and binds[0] else 'none')" 2>/dev/null || echo "none")
-  if [ "$HOST_BIND" = "none" ]; then
-    pass "PostgreSQL sem porta exposta no host"
+docker inspect r-observe-postgres >/dev/null 2>&1 && {
+  HOST_BIND=$(docker inspect --format='{{range $p,$c := .NetworkSettings.Ports}}{{if $c}}{{(index $c 0).HostIp}}{{"\n"}}{{end}}{{end}}' r-observe-postgres 2>/dev/null | head -1)
+  HOST_BIND="${HOST_BIND:-none}"
+  if [[ "$HOST_BIND" = "none" || "$HOST_BIND" = "127.0.0.1" || "$HOST_BIND" = "::1" ]]; then
+    pass "PostgreSQL sem exposição externa (bind: $HOST_BIND)"
   else
     fail "PostgreSQL exposto no host (IP: $HOST_BIND) — banco não deve ser acessível externamente!"
   fi
-} || warn "observe-postgres não está rodando"
+} || warn "r-observe-postgres não está rodando"
 
 # ─── Redis ─────────────────────────────────────────────────────────────────────
 section "Redis"
-docker inspect observe-redis >/dev/null 2>&1 && {
-  REDIS_BIND=$(docker inspect observe-redis | python3 -c "import sys,json; d=json.load(sys.stdin); ports=d[0].get('NetworkSettings',{}).get('Ports',{}); binds=list(ports.values()); print(binds[0][0]['HostIp'] if binds and binds[0] else 'none')" 2>/dev/null || echo "none")
-  if [ "$REDIS_BIND" = "none" ]; then
-    pass "Redis sem porta exposta no host"
+docker inspect r-observe-redis >/dev/null 2>&1 && {
+  REDIS_BIND=$(docker inspect --format='{{range $p,$c := .NetworkSettings.Ports}}{{if $c}}{{(index $c 0).HostIp}}{{"\n"}}{{end}}{{end}}' r-observe-redis 2>/dev/null | head -1)
+  REDIS_BIND="${REDIS_BIND:-none}"
+  if [[ "$REDIS_BIND" = "none" || "$REDIS_BIND" = "127.0.0.1" || "$REDIS_BIND" = "::1" ]]; then
+    pass "Redis sem exposição externa (bind: $REDIS_BIND)"
   else
     fail "Redis exposto no host — não deve ser acessível externamente!"
   fi
-} || warn "observe-redis não está rodando"
+} || warn "r-observe-redis não está rodando"
 
 # ─── docker.sock ──────────────────────────────────────────────────────────────
 section "Docker socket"
 docker inspect r-observe-agent >/dev/null 2>&1 && {
-  SOCK_MODE=$(docker inspect r-observe-agent | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-mounts = d[0].get('Mounts', [])
-for m in mounts:
-    if 'docker.sock' in m.get('Source', ''):
-        print(m.get('Mode', 'unknown'))
-        break
-else:
-    print('not_mounted')
-" 2>/dev/null || echo "unknown")
+  SOCK_MODE=$(docker inspect --format='{{range .Mounts}}{{if eq .Source "/var/run/docker.sock"}}{{.Mode}}{{end}}{{end}}' r-observe-agent 2>/dev/null)
+  SOCK_MODE="${SOCK_MODE:-not_mounted}"
   if [ "$SOCK_MODE" = "ro" ]; then
     pass "docker.sock montado como read-only no agente"
   elif [ "$SOCK_MODE" = "not_mounted" ]; then
@@ -71,16 +63,11 @@ else:
 # ─── no-new-privileges ────────────────────────────────────────────────────────
 section "no-new-privileges"
 
-OBSERVE_CONTAINERS=("observe-postgres" "observe-redis" "r-observe-api" "r-observe-worker" "r-observe-ai" "r-observe-agent" "observe-proxy")
+OBSERVE_CONTAINERS=("r-observe-postgres" "r-observe-redis" "r-observe-db-bootstrap" "r-observe-api" "r-observe-worker" "r-observe-ai" "r-observe-agent" "r-observe-proxy")
 
 for c in "${OBSERVE_CONTAINERS[@]}"; do
   docker inspect "$c" >/dev/null 2>&1 && {
-    NNP=$(docker inspect "$c" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-opts = d[0].get('HostConfig', {}).get('SecurityOpt', [])
-print('yes' if any('no-new-privileges:true' in o for o in opts) else 'no')
-" 2>/dev/null || echo "no")
+    NNP=$(docker inspect --format='{{range .HostConfig.SecurityOpt}}{{.}}{{"\n"}}{{end}}' "$c" 2>/dev/null | grep -q 'no-new-privileges:true' && echo yes || echo no)
     if [ "$NNP" = "yes" ]; then
       pass "$c: no-new-privileges=true"
     else
@@ -94,8 +81,8 @@ section "Rotação de logs"
 
 for c in "${OBSERVE_CONTAINERS[@]}"; do
   docker inspect "$c" >/dev/null 2>&1 && {
-    LOG_DRIVER=$(docker inspect "$c" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('HostConfig',{}).get('LogConfig',{}).get('Type','default'))" 2>/dev/null || echo "default")
-    MAX_SIZE=$(docker inspect "$c" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('HostConfig',{}).get('LogConfig',{}).get('Config',{}).get('max-size','none'))" 2>/dev/null || echo "none")
+    LOG_DRIVER=$(docker inspect --format='{{.HostConfig.LogConfig.Type}}' "$c" 2>/dev/null || echo "default")
+    MAX_SIZE=$(docker inspect --format='{{index .HostConfig.LogConfig.Config "max-size"}}' "$c" 2>/dev/null || echo "none")
     if [ "$MAX_SIZE" != "none" ]; then
       pass "$c: log max-size=$MAX_SIZE"
     else
@@ -107,14 +94,16 @@ done
 # ─── Variáveis sensíveis no .env ──────────────────────────────────────────────
 section "Variáveis de ambiente"
 if [ -f "$ENV_FILE" ]; then
-  CHANGE_ME_COUNT=$(grep -c "CHANGE_ME" "$ENV_FILE" 2>/dev/null || echo "0")
+  CHANGE_ME_COUNT=$(grep -c "CHANGE_ME" "$ENV_FILE" 2>/dev/null || true)
+  CHANGE_ME_COUNT="${CHANGE_ME_COUNT:-0}"
   if [ "$CHANGE_ME_COUNT" -gt 0 ]; then
     fail "Existem $CHANGE_ME_COUNT valor(es) CHANGE_ME no .env.observe — altere antes de produção!"
   else
     pass "Nenhum valor CHANGE_ME no .env.observe"
   fi
   # Verifica se .env.observe está no .gitignore
-  if grep -q "\.env\.observe$\|\.env\.observe " "${ROOT_DIR}/.gitignore" 2>/dev/null; then
+  if git -C "$ROOT_DIR" check-ignore -q "$ENV_FILE" 2>/dev/null || \
+      git -C "$ROOT_DIR" check-ignore -q "${ROOT_DIR}/.env.observe" 2>/dev/null; then
     pass ".env.observe está no .gitignore"
   else
     warn ".env.observe não encontrado no .gitignore — verifique para não commitar segredos"

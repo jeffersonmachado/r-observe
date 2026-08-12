@@ -3,6 +3,20 @@
 const dgram = require('dgram');
 const { log } = require('../utils/logger');
 const { isValidIPv4 } = require('../scanners/target-expansion');
+const PASSIVE_MAX_PACKET_BYTES = Math.max(512, parseInt(process.env.DISCOVERY_PASSIVE_MAX_PACKET_BYTES || '8192', 10));
+const PASSIVE_RATE_PER_MINUTE = Math.max(1, parseInt(process.env.DISCOVERY_PASSIVE_RATE_PER_MINUTE || '600', 10));
+const _sourceRates = new Map();
+
+function allowSource(source) {
+  const now = Date.now();
+  const current = _sourceRates.get(source);
+  if (!current || now - current.startedAt >= 60000) {
+    _sourceRates.set(source, { startedAt: now, count: 1 });
+    return true;
+  }
+  current.count++;
+  return current.count <= PASSIVE_RATE_PER_MINUTE;
+}
 
 function sanitizeText(value, maxLen = 1024) {
   return String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLen);
@@ -157,6 +171,11 @@ function bindUdpServer({ port, host = '0.0.0.0', multicast, onMessage, label }) 
 
   sock.on('message', (msg, rinfo) => {
     try {
+      if (msg.length > PASSIVE_MAX_PACKET_BYTES) {
+        log('warn', 'Passive UDP packet rejected: too large', { label, source: rinfo.address, bytes: msg.length });
+        return;
+      }
+      if (!allowSource(`${label}:${rinfo.address}`)) return;
       onMessage(msg, rinfo);
     } catch (err) {
       log('warn', 'Passive UDP message handling failed', { label, port, err: err.message });
@@ -236,4 +255,5 @@ module.exports = {
   parseSsdpMessage,
   parseMdnsMessage,
   parseSnmpTrapMessage,
+  allowSource,
 };

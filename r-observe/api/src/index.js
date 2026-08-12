@@ -9,20 +9,25 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const Redis = require('ioredis');
 const client = require('prom-client');
-const { v4: uuidv4 } = require('uuid');
 const icinga = require('./icinga');
 const { createDbClient } = require('./db');
-const { signInternalToken, verifyInternalToken } = require('./jwt');
+const { signInternalToken, requireScopeForJwt } = require('@results/auth');
 const { createAuthMiddleware } = require('./middleware/auth');
+const { LoginGuard } = require('./auth/login-guard');
+const { RedisRateLimitStore } = require('./auth/redis-rate-limit-store');
+const { validateBody } = require('./middleware/validate-body');
+const bodySchemas = require('./schemas/api');
+const { createCorsOptions } = require('./http/cors-options');
 const { createAISettingsService } = require('./services/ai-settings');
-const { createLifecycle } = require('../shared/lifecycle');
+const { createLifecycle } = require('./shared/lifecycle');
+const { createHttpErrorHandler } = require('./shared/http-error-handler');
+const { createAuditMiddleware } = require('./audit');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BASE = process.env.BASE_PATH || '/observe/api';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const SESSION_COOKIE = process.env.OBSERVE_SESSION_COOKIE || 'observe_session';
-const SESSION_TTL_HOURS = parseInt(process.env.OBSERVE_SESSION_TTL_HOURS || '12', 10);
 const AI_SETTINGS_RECONCILE_INTERVAL_MS = parseInt(process.env.AI_SETTINGS_RECONCILE_INTERVAL_MS || '60000', 10);
 const IS_DEV = process.env.NODE_ENV === 'development';
 const VITE_DEV_ORIGIN = (process.env.VITE_DEV_ORIGIN || 'http://127.0.0.1:5177').replace(/\/+$/, '');
@@ -38,7 +43,7 @@ const DISCOVERY_PROXY_ORIGIN = (
 const GRAFANA_URL = process.env.GRAFANA_PUBLIC_URL || '/grafana/';
 const ICINGA_WEB_URL = process.env.ICINGA_WEB_PUBLIC_URL || '/icinga/';
 const DISCOVERY_UI_URL = process.env.DISCOVERY_UI_PUBLIC_URL || '/observe/discovery';
-const { VALID_AI_PROVIDERS, AI_AUTO_MODELS, AI_STATIC_MODELS } = require('../shared/ai-models');
+const { VALID_AI_PROVIDERS, AI_AUTO_MODELS, AI_STATIC_MODELS } = require('./shared/ai-models');
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
 function log(level, msg, extra = {}) {
@@ -69,6 +74,16 @@ const eventsReceivedTotal = new client.Counter({
   labelNames: ['source'],
   registers: [register],
 });
+const activeIncidentsGauge = new client.Gauge({
+  name: 'r_observe_active_incidents',
+  help: 'Active (non-resolved) incidents',
+  registers: [register],
+});
+const activeSessionsGauge = new client.Gauge({
+  name: 'r_observe_active_sessions',
+  help: 'Active user sessions',
+  registers: [register],
+});
 
 // ─── Database ────────────────────────────────────────────────────────────────
 const db = createDbClient(process.env);
@@ -82,6 +97,12 @@ if (redis) {
   redis.on('error', (err) => log('error', 'Redis error', { err: err.message }));
   redis.connect().catch((e) => log('warn', 'Redis initial connect failed', { err: e.message }));
 }
+
+const loginGuard = new LoginGuard(redis, {
+  maxAttempts: parseInt(process.env.OBSERVE_LOGIN_MAX_ATTEMPTS || '5', 10),
+  windowSeconds: parseInt(process.env.OBSERVE_LOGIN_WINDOW_SECONDS || '900', 10),
+  lockSeconds: parseInt(process.env.OBSERVE_LOGIN_LOCK_SECONDS || '900', 10),
+});
 
 // ─── Express ──────────────────────────────────────────────────────────────────
 const app = express();
@@ -164,12 +185,24 @@ if (IS_DEV) {
   app.use(['/grafana', '/icinga'], (req, res) => devProxyToOrigin(req, res, OBSERVE_PROXY_ORIGIN));
 }
 
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({
-  origin: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()) : false,
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-internal-token'],
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      baseUri: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'self'"],
+      formAction: ["'self'"],
+      imgSrc: ["'self'", 'data:'],
+      fontSrc: ["'self'", 'data:'],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      connectSrc: ["'self'"],
+      upgradeInsecureRequests: null,
+    },
+  },
 }));
+app.use(cors(createCorsOptions(process.env.CORS_ORIGINS)));
 app.use(express.json({ limit: '512kb' }));
 
 // ─── Middleware: request logging + metrics ────────────────────────────────────
@@ -183,76 +216,58 @@ app.use((req, res, next) => {
 
 // ─── Auth + RBAC (extraído para middleware/auth.js) ──────────────────────────
 const {
+  init: initAuth,
+  createAuthRoutes,
   requireAuth,
-  requireRole,
   requireAdmin,
   parseCookies,
   sessionHash,
-  setSessionCookie,
-  clearSessionCookie,
-  getContactRole,
   authenticateRequest,
-} = createAuthMiddleware(db, SESSION_COOKIE, log);
+} = createAuthMiddleware(db, SESSION_COOKIE, log, { loginGuard });
+
+// Sessões humanas usam RBAC; identidades M2M precisam também do domínio explícito.
+const requireAdminWrite = requireScopeForJwt('api:admin:write');
+const requireInventoryWrite = requireScopeForJwt('api:inventory:write');
+const requireDiscoveryWrite = requireScopeForJwt('api:discovery:write');
+const requireAIWrite = requireScopeForJwt('api:ai:write');
+const requireRemediationWrite = requireScopeForJwt('api:remediation:write');
+
+// Páginas navegáveis devem conduzir o usuário ao login. O requireAuth continua
+// retornando JSON 401 para APIs e clientes M2M.
+function requireWebSession(req, res, next) {
+  authenticateRequest(req).then((auth) => {
+    if (!auth) {
+      const nextPath = req.originalUrl.startsWith('/observe/') ? req.originalUrl : '/observe/home';
+      return res.redirect(`/observe/login?next=${encodeURIComponent(nextPath)}`);
+    }
+    req.auth = auth;
+    next();
+  }).catch((error) => {
+    log('warn', 'Web session validation failed', { err: error.message });
+    res.redirect(`/observe/login?next=${encodeURIComponent(req.originalUrl || '/observe/home')}`);
+  });
+}
 
 // ─── Rate limiters ────────────────────────────────────────────────────────────
 const RL_WINDOW = parseInt(process.env.OBSERVE_RATE_LIMIT_WINDOW_MS || '60000', 10);
-const eventLimiter = rateLimit({ windowMs: RL_WINDOW, max: parseInt(process.env.OBSERVE_RATE_LIMIT_EVENTS_MAX || '100', 10), standardHeaders: true, legacyHeaders: false });
-const apiLimiter  = rateLimit({ windowMs: RL_WINDOW, max: parseInt(process.env.OBSERVE_RATE_LIMIT_API_MAX || '300', 10), standardHeaders: true, legacyHeaders: false });
-
-// ─── Auth endpoints ─────────────────────────────────────────────────────────
-app.post(`${BASE}/auth/login`, apiLimiter, async (req, res) => {
-  const username = String(req.body?.username || '').trim();
-  const password = String(req.body?.password || '');
-  if (!username || !password) return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
-
-  try {
-    const r = await db.query(`
-      SELECT "name", "active"
-      FROM icingaweb_user
-      WHERE lower("name") = lower($1::text)
-        AND "active" = 1
-        AND "password_hash" = convert_to(crypt($2::text, convert_from("password_hash", 'UTF8')), 'UTF8')
-      LIMIT 1
-    `, [username, password]);
-    if (!r.rowCount) return res.status(401).json({ error: 'Credenciais inválidas' });
-
-    const user = r.rows[0].name;
-    const role = await getContactRole(db, user);
-    const token = crypto.randomBytes(32).toString('base64url');
-    const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 60 * 60 * 1000);
-
-    await db.query(`
-      INSERT INTO observe_sessions (token_hash, username, role, user_agent, ip, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `, [
-      sessionHash(token),
-      user,
-      role,
-      String(req.headers['user-agent'] || '').slice(0, 512),
-      req.ip || req.socket?.remoteAddress || null,
-      expiresAt,
-    ]);
-
-    setSessionCookie(req, res, SESSION_COOKIE, token, expiresAt);
-    res.json({ ok: true, user: { name: user, role }, expires_at: expiresAt.toISOString() });
-  } catch (e) {
-    log('warn', 'Login failed', { user: username, err: e.message });
-    res.status(500).json({ error: 'Falha ao autenticar' });
-  }
+const eventLimiter = rateLimit({
+  windowMs: RL_WINDOW,
+  max: parseInt(process.env.OBSERVE_RATE_LIMIT_EVENTS_MAX || '100', 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: new RedisRateLimitStore(redis, { prefix: 'r-observe:rate:events', windowMs: RL_WINDOW }),
+});
+const apiLimiter = rateLimit({
+  windowMs: RL_WINDOW,
+  max: parseInt(process.env.OBSERVE_RATE_LIMIT_API_MAX || '300', 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: new RedisRateLimitStore(redis, { prefix: 'r-observe:rate:api', windowMs: RL_WINDOW }),
 });
 
-app.post(`${BASE}/auth/logout`, requireAuth, async (req, res) => {
-  const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
-  if (token) {
-    await db.query(`DELETE FROM observe_sessions WHERE token_hash = $1`, [sessionHash(token)]).catch(() => {});
-  }
-  clearSessionCookie(req, res);
-  res.json({ ok: true });
-});
-
-app.get(`${BASE}/auth/me`, requireAuth, async (req, res) => {
-  res.json({ user: { name: req.auth.user, role: req.auth.role, auth_type: req.auth.type } });
-});
+// ─── Auth endpoints centralizados em @results/auth ──────────────────────────
+app.use(`${BASE}/auth/login`, apiLimiter);
+app.use(createAuthRoutes(`${BASE}/auth`));
 
 // ─── Serviços (extraídos para services/) ─────────────────────────────────────
 const {
@@ -267,12 +282,14 @@ const {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
+app.use(createAuditMiddleware(db, log, { basePath: BASE }));
+
 // Health
 app.get(`${BASE}/health`, (_req, res) => {
   res.json({ status: 'ok', service: 'r-observe-api', version: '0.1.0' });
 });
 
-// Prometheus metrics
+// Prometheus faz scrape pela rede interna. O proxy público bloqueia esta rota.
 app.get(`${BASE}/metrics`, async (_req, res) => {
   res.set('Content-Type', register.contentType);
   res.end(await register.metrics());
@@ -434,7 +451,7 @@ app.get(`${BASE}/contacts`, requireAuth, apiLimiter, async (_req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post(`${BASE}/contacts`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/contacts`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
   const { name, password, active, admin } = req.body || {};
   const username = String(name || '').trim();
   if (!/^[a-zA-Z0-9_.@-]{2,128}$/.test(username)) {
@@ -451,14 +468,14 @@ app.post(`${BASE}/contacts`, requireAuth, requireAdmin, async (req, res) => {
     if (exists.rowCount) return res.status(409).json({ error: 'contato já existe' });
     await db.query(`
       INSERT INTO icingaweb_user ("name", "active", "password_hash", "ctime", "mtime")
-      VALUES ($1::varchar, $2::smallint, convert_to(crypt($3::text, gen_salt('bf')), 'UTF8'), NOW(), NOW())
+      VALUES ($1::varchar, $2::smallint, convert_to(crypt($3::text, gen_salt('bf', 12)), 'UTF8'), NOW(), NOW())
     `, [username, active === false ? 0 : 1, String(password)]);
     await setContactAdmin(username, admin === true);
     res.status(201).json({ contact: { name: username, active: active === false ? 0 : 1, admin: admin === true } });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.patch(`${BASE}/contacts/:name`, requireAuth, requireAdmin, async (req, res) => {
+app.patch(`${BASE}/contacts/:name`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
   const username = String(req.params.name || '').trim();
   const { password, active, admin } = req.body || {};
   try {
@@ -468,7 +485,7 @@ app.patch(`${BASE}/contacts/:name`, requireAuth, requireAdmin, async (req, res) 
     if (active !== undefined) { updates.push(`"active" = $${i++}::smallint`); vals.push(active === false ? 0 : 1); }
     if (password) {
       if (String(password).length < 8) return res.status(400).json({ error: 'password deve ter pelo menos 8 caracteres' });
-      updates.push(`"password_hash" = convert_to(crypt($${i++}::text, gen_salt('bf')), 'UTF8')`);
+      updates.push(`"password_hash" = convert_to(crypt($${i++}::text, gen_salt('bf', 12)), 'UTF8')`);
       vals.push(String(password));
     }
     if (updates.length) {
@@ -506,7 +523,7 @@ app.get(`${BASE}/hosts/:name`, requireAuth, async (req, res) => {
 });
 
 // Hosts — criação/upsert manual (registra em DB + Icinga2)
-app.post(`${BASE}/hosts`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/hosts`, requireAuth, requireAdmin, requireInventoryWrite, async (req, res) => {
   const { name, address, display_name, vars } = req.body;
   if (!name || !address) return res.status(400).json({ error: '"name" e "address" são obrigatórios' });
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(name))
@@ -516,10 +533,10 @@ app.post(`${BASE}/hosts`, requireAuth, requireAdmin, async (req, res) => {
     const r = await db.query(
       `INSERT INTO observe_hosts (id, name, address, metadata, updated_at)
        VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (name)
+       ON CONFLICT (tenant_id, name)
        DO UPDATE SET address = EXCLUDED.address, metadata = EXCLUDED.metadata, updated_at = NOW()
        RETURNING *`,
-      [uuidv4(), name, address, JSON.stringify({ source: 'manual', display_name, vars })]
+      [crypto.randomUUID(), name, address, JSON.stringify({ source: 'manual', display_name, vars })]
     );
     // Sincroniza com Icinga2 (não-fatal: falha no Icinga não impede resposta)
     let icingaResult = { ok: false, existed: false, error: 'unreachable' };
@@ -534,7 +551,7 @@ app.post(`${BASE}/hosts`, requireAuth, requireAdmin, async (req, res) => {
 });
 
 // Inventory — Docker local agent bulk upsert
-app.post(`${BASE}/inventory/docker`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/inventory/docker`, requireAuth, requireAdmin, requireInventoryWrite, validateBody(bodySchemas.dockerInventory), async (req, res) => {
   const { agent_id, host, address, containers } = req.body || {};
   const hostName = host || agent_id;
   if (!hostName) return res.status(400).json({ error: '"agent_id" ou "host" é obrigatório' });
@@ -548,14 +565,14 @@ app.post(`${BASE}/inventory/docker`, requireAuth, requireAdmin, async (req, res)
     const hostResult = await client.query(
       `INSERT INTO observe_hosts (id, name, address, status, last_check, metadata, updated_at)
        VALUES ($1, $2, $3, 'up', NOW(), $4, NOW())
-       ON CONFLICT (name)
+       ON CONFLICT (tenant_id, name)
        DO UPDATE SET address = EXCLUDED.address,
                      status = 'up',
                      last_check = NOW(),
                      metadata = EXCLUDED.metadata,
                      updated_at = NOW()
        RETURNING id`,
-      [uuidv4(), hostName, address || null, JSON.stringify({
+      [crypto.randomUUID(), hostName, address || null, JSON.stringify({
         source: 'docker-agent',
         agent_id: agent_id || hostName,
         container_count: containers.length,
@@ -574,14 +591,14 @@ app.post(`${BASE}/inventory/docker`, requireAuth, requireAdmin, async (req, res)
       await client.query(
         `INSERT INTO observe_services (id, host_id, name, status, last_check, output, metadata, updated_at)
          VALUES ($1, $2, $3, $4, NOW(), $5, $6, NOW())
-         ON CONFLICT (host_id, name)
+         ON CONFLICT (tenant_id, host_id, name)
          DO UPDATE SET status = EXCLUDED.status,
                        last_check = NOW(),
                        output = EXCLUDED.output,
                        metadata = EXCLUDED.metadata,
                        updated_at = NOW()`,
         [
-          uuidv4(),
+          crypto.randomUUID(),
           hostId,
           c.name,
           status,
@@ -616,7 +633,7 @@ app.post(`${BASE}/inventory/docker`, requireAuth, requireAdmin, async (req, res)
 });
 
 // Hosts — remoção (remove de DB + Icinga2)
-app.delete(`${BASE}/hosts/:name`, requireAuth, requireAdmin, async (req, res) => {
+app.delete(`${BASE}/hosts/:name`, requireAuth, requireAdmin, requireInventoryWrite, async (req, res) => {
   const { name } = req.params;
   try {
     const r = await db.query('DELETE FROM observe_hosts WHERE name = $1 RETURNING id', [name]);
@@ -633,7 +650,7 @@ app.delete(`${BASE}/hosts/:name`, requireAuth, requireAdmin, async (req, res) =>
 });
 
 // Hosts — dispara scan de rede (enfileira para o agente/script externo processar)
-app.post(`${BASE}/hosts/scan`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/hosts/scan`, requireAuth, requireAdmin, requireInventoryWrite, async (req, res) => {
   const { subnet } = req.body;
   const task = JSON.stringify({ type: 'scan:requested', subnet: subnet || null, requested_at: new Date().toISOString() });
   try {
@@ -741,12 +758,12 @@ app.get(`${BASE}/discovery/policies`, requireAuth, async (req, res) => {
   res.status(out.status).json(out.data);
 });
 
-app.post(`${BASE}/discovery/policies`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/discovery/policies`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery('/api/discovery/policies', { method: 'POST', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
 
-app.post(`${BASE}/discovery/scan`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/discovery/scan`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery('/api/discovery/scan', { method: 'POST', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
@@ -762,11 +779,11 @@ app.get(`${BASE}/discovery/progress`, requireAuth, async (_req, res) => {
 });
 
 // Policies — PATCH e DELETE
-app.patch(`${BASE}/discovery/policies/:id`, requireAuth, requireAdmin, async (req, res) => {
+app.patch(`${BASE}/discovery/policies/:id`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/policies/${req.params.id}`, { method: 'PATCH', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
-app.delete(`${BASE}/discovery/policies/:id`, requireAuth, requireAdmin, async (req, res) => {
+app.delete(`${BASE}/discovery/policies/:id`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/policies/${req.params.id}`, { method: 'DELETE' });
   res.status(out.status).json(out.data);
 });
@@ -776,21 +793,21 @@ app.get(`${BASE}/discovery/targets`, requireAuth, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/targets${discoveryQuery(req)}`);
   res.status(out.status).json(out.data);
 });
-app.post(`${BASE}/discovery/targets`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/discovery/targets`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery('/api/discovery/targets', { method: 'POST', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
-app.patch(`${BASE}/discovery/targets/:id`, requireAuth, requireAdmin, async (req, res) => {
+app.patch(`${BASE}/discovery/targets/:id`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/targets/${req.params.id}`, { method: 'PATCH', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
-app.delete(`${BASE}/discovery/targets/:id`, requireAuth, requireAdmin, async (req, res) => {
+app.delete(`${BASE}/discovery/targets/:id`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/targets/${req.params.id}`, { method: 'DELETE' });
   res.status(out.status).json(out.data);
 });
 
 // Assets — atualizar ciclo de vida
-app.patch(`${BASE}/discovery/assets/:id`, requireAuth, requireAdmin, async (req, res) => {
+app.patch(`${BASE}/discovery/assets/:id`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/assets/${req.params.id}`, { method: 'PATCH', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
@@ -800,15 +817,15 @@ app.get(`${BASE}/discovery/schedules`, requireAuth, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/schedules${discoveryQuery(req)}`);
   res.status(out.status).json(out.data);
 });
-app.post(`${BASE}/discovery/schedules`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/discovery/schedules`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery('/api/discovery/schedules', { method: 'POST', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
-app.patch(`${BASE}/discovery/schedules/:id`, requireAuth, requireAdmin, async (req, res) => {
+app.patch(`${BASE}/discovery/schedules/:id`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/schedules/${req.params.id}`, { method: 'PATCH', body: JSON.stringify(req.body || {}) });
   res.status(out.status).json(out.data);
 });
-app.delete(`${BASE}/discovery/schedules/:id`, requireAuth, requireAdmin, async (req, res) => {
+app.delete(`${BASE}/discovery/schedules/:id`, requireAuth, requireAdmin, requireDiscoveryWrite, async (req, res) => {
   const out = await proxyToDiscovery(`/api/discovery/schedules/${req.params.id}`, { method: 'DELETE' });
   res.status(out.status).json(out.data);
 });
@@ -867,25 +884,25 @@ app.get(`${BASE}/incidents/:id`, requireAuth, async (req, res) => {
 });
 
 // Events (generic)
-app.post(`${BASE}/events`, requireAuth, eventLimiter, async (req, res) => {
+app.post(`${BASE}/events`, requireAuth, requireScopeForJwt('api:events:write'), eventLimiter, validateBody(bodySchemas.event), async (req, res) => {
   const event = req.body;
   if (!event || !event.type) return res.status(400).json({ error: 'event.type is required' });
   try {
     eventsReceivedTotal.inc({ source: event.source || 'generic' });
     if (redis) await redis.rpush('observe:events', JSON.stringify({ ...event, receivedAt: new Date().toISOString() }));
-    res.status(202).json({ accepted: true, id: uuidv4() });
+    res.status(202).json({ accepted: true, id: crypto.randomUUID() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Icinga events
-app.post(`${BASE}/icinga/events`, requireAuth, eventLimiter, async (req, res) => {
+app.post(`${BASE}/icinga/events`, requireAuth, requireScopeForJwt('api:events:write'), eventLimiter, validateBody(bodySchemas.icingaEvent), async (req, res) => {
   const event = req.body;
   if (!event) return res.status(400).json({ error: 'Body obrigatório' });
   try {
     eventsReceivedTotal.inc({ source: 'icinga' });
     const payload = JSON.stringify({ ...event, source: 'icinga', receivedAt: new Date().toISOString() });
     if (redis) await redis.rpush('observe:events:icinga', payload);
-    res.status(202).json({ accepted: true, id: uuidv4() });
+    res.status(202).json({ accepted: true, id: crypto.randomUUID() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -941,6 +958,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background
 .topbar-title{font-size:.85rem;color:var(--muted)}
 .topbar a{color:var(--accent);text-decoration:none;font-size:.85rem}
 .topbar a:hover{text-decoration:underline}
+.topbar button{color:var(--accent);background:transparent;border:0;font:inherit;font-size:.85rem;cursor:pointer}
+.topbar button:hover{text-decoration:underline}
+.topbar a:focus-visible,.topbar button:focus-visible,.meta-toggle:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
 .container{max-width:1100px;margin:0 auto;padding:1.5rem}
 .back-link{display:inline-block;margin-bottom:1rem;color:var(--accent);text-decoration:none;font-size:.875rem}
 h1{font-size:1.5rem;margin-bottom:.25rem}
@@ -965,6 +985,7 @@ td{padding:.5rem;border-bottom:1px solid var(--border)}
 .status-closed{color:var(--red)}
 .status-filtered{color:var(--yellow)}
 .meta-json{font-size:.75rem;background:#0f172a;padding:.75rem;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:var(--muted);max-height:300px;overflow-y:auto}
+.meta-toggle{cursor:pointer}
 .loading{text-align:center;padding:3rem;color:var(--muted)}
 .error{text-align:center;padding:3rem;color:var(--red)}
 </style>
@@ -977,7 +998,7 @@ td{padding:.5rem;border-bottom:1px solid var(--border)}
   <a href="/observe/home">⌂ Home</a>
   <a href="/observe/discovery">🔍 Discovery</a>
   <a href="/observe/settings">⚙ Configuração</a>
-  <a href="/observe/api/auth/logout">Sair</a>
+  <button type="button" onclick="logout()">Sair</button>
 </div>
 <div class="container">
   <a href="/observe/discovery" class="back-link">← Voltar para Discovery</a>
@@ -985,7 +1006,9 @@ td{padding:.5rem;border-bottom:1px solid var(--border)}
 </div>
 <script>
 const ASSET_ID = '__ASSET_ID__';
-function toggleMeta(card){ var id = card.getAttribute("data-meta"); if (!id) return; var content = document.getElementById('mc-'+id); var title = card.querySelector('.card-title'); if (!content || !title) return; var isOpen = content.style.display !== 'none'; if (isOpen) { content.style.display = 'none'; title.textContent = title.textContent.replace(' ▾',' ▸'); return; } content.style.display = 'block'; title.textContent = title.textContent.replace(' ▸',' ▾'); if (content.dataset.loaded) return; content.dataset.loaded = '1'; var m = window._assetMeta || {}; var r = window._r || function(l,v){ return '<div class="info-row"><span class="info-label">'+l+'</span><span class="info-value">'+v+'</span></div>'; }; var hh = ''; if (id === 'scan') { var s = m.scan || {}; if (s.open_ports && s.open_ports.length) hh+=r('Portas abertas', s.open_ports.length); if (s.hostname) hh+=r('Hostname', s.hostname); if (s.ssh_banner) hh+=r('SSH Banner', s.ssh_banner); if (s.http_server) hh+=r('HTTP Server', s.http_server); if (s.http_title) hh+=r('HTTP Title', s.http_title); if (s.smtp_banner) hh+=r('SMTP Banner', s.smtp_banner); if (s.tls_subject) hh+=r('TLS Subject', s.tls_subject); if (s.tls_issuer) hh+=r('TLS Issuer', s.tls_issuer); if (s.tls_valid_from && s.tls_valid_to) hh+=r('TLS Validade', s.tls_valid_from+' → '+s.tls_valid_to); if (s.favicon_hash) hh+=r('Favicon Hash', s.favicon_hash); if (s.protocols_detected) { var p=Object.entries(s.protocols_detected).filter(function(e){return e[1];}).map(function(e){return e[0];}).join(', '); if(p) hh+=r('Protocolos', p); } if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado de scan.</p>'; } else if (id === 'inference') { var i = m.inference || {}; if (i.vendor) hh+=r('Fabricante inferido', i.vendor); if (i.product) hh+=r('Produto inferido', i.product); if (i.service) hh+=r('Serviço inferido', i.service); if (i.category) hh+=r('Categoria', i.category); if (i.evidence) hh+=r('Evidências', i.evidence.length); if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado de inferência.</p>'; } else if (id === 'snmp') { var sn = m.snmp || {}; if (sn.sysDescr) hh+=r('sysDescr', sn.sysDescr); if (sn.sysName) hh+=r('sysName', sn.sysName); if (sn.sysUptime) hh+=r('sysUptime', sn.sysUptime); if (sn.sysObjectID) hh+=r('sysObjectID', sn.sysObjectID); if (sn.sysLocation) hh+=r('sysLocation', sn.sysLocation); if (sn.sysContact) hh+=r('sysContact', sn.sysContact); if (sn.interfaces && sn.interfaces.length) hh+=r('Interfaces SNMP', sn.interfaces.length+' detectadas'); if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado SNMP.</p>'; } else if (id === 'banners') { var b = (m.scan && m.scan.port_banners) ? m.scan.port_banners : {}; var keys = Object.keys(b); if (keys.length > 0) { hh+='<table><thead><tr><th>Porta</th><th>Banner</th></tr></thead><tbody>'; keys.slice(0,10).forEach(function(k){ hh+='<tr><td><strong>'+k+'</strong></td><td style="font-size:.75rem;max-width:400px;word-break:break-all">'+(b[k]||'—')+'</td></tr>'; }); hh+='</tbody></table>'; } else hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum banner detectado.</p>'; } else if (id === 'json') { hh = JSON.stringify(m, null, 2); } content.innerHTML = hh; }
+function toggleMeta(card){ var id = card.getAttribute("data-meta"); if (!id) return; var content = document.getElementById('mc-'+id); var title = card.querySelector('.card-title'); if (!content || !title) return; var isOpen = content.style.display !== 'none'; card.setAttribute('aria-expanded',String(!isOpen)); if (isOpen) { content.style.display = 'none'; title.textContent = title.textContent.replace(' ▾',' ▸'); return; } content.style.display = 'block'; title.textContent = title.textContent.replace(' ▸',' ▾'); if (content.dataset.loaded) return; content.dataset.loaded = '1'; var m = window._assetMeta || {}; var r = window._r || function(l,v){ return '<div class="info-row"><span class="info-label">'+l+'</span><span class="info-value">'+v+'</span></div>'; }; var hh = ''; if (id === 'scan') { var s = m.scan || {}; if (s.open_ports && s.open_ports.length) hh+=r('Portas abertas', s.open_ports.length); if (s.hostname) hh+=r('Hostname', s.hostname); if (s.ssh_banner) hh+=r('SSH Banner', s.ssh_banner); if (s.http_server) hh+=r('HTTP Server', s.http_server); if (s.http_title) hh+=r('HTTP Title', s.http_title); if (s.smtp_banner) hh+=r('SMTP Banner', s.smtp_banner); if (s.tls_subject) hh+=r('TLS Subject', s.tls_subject); if (s.tls_issuer) hh+=r('TLS Issuer', s.tls_issuer); if (s.tls_valid_from && s.tls_valid_to) hh+=r('TLS Validade', s.tls_valid_from+' → '+s.tls_valid_to); if (s.favicon_hash) hh+=r('Favicon Hash', s.favicon_hash); if (s.protocols_detected) { var p=Object.entries(s.protocols_detected).filter(function(e){return e[1];}).map(function(e){return e[0];}).join(', '); if(p) hh+=r('Protocolos', p); } if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado de scan.</p>'; } else if (id === 'inference') { var i = m.inference || {}; if (i.vendor) hh+=r('Fabricante inferido', i.vendor); if (i.product) hh+=r('Produto inferido', i.product); if (i.service) hh+=r('Serviço inferido', i.service); if (i.category) hh+=r('Categoria', i.category); if (i.evidence) hh+=r('Evidências', i.evidence.length); if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado de inferência.</p>'; } else if (id === 'snmp') { var sn = m.snmp || {}; if (sn.sysDescr) hh+=r('sysDescr', sn.sysDescr); if (sn.sysName) hh+=r('sysName', sn.sysName); if (sn.sysUptime) hh+=r('sysUptime', sn.sysUptime); if (sn.sysObjectID) hh+=r('sysObjectID', sn.sysObjectID); if (sn.sysLocation) hh+=r('sysLocation', sn.sysLocation); if (sn.sysContact) hh+=r('sysContact', sn.sysContact); if (sn.interfaces && sn.interfaces.length) hh+=r('Interfaces SNMP', sn.interfaces.length+' detectadas'); if (!hh) hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum dado SNMP.</p>'; } else if (id === 'banners') { var b = (m.scan && m.scan.port_banners) ? m.scan.port_banners : {}; var keys = Object.keys(b); if (keys.length > 0) { hh+='<table><thead><tr><th>Porta</th><th>Banner</th></tr></thead><tbody>'; keys.slice(0,10).forEach(function(k){ hh+='<tr><td><strong>'+k+'</strong></td><td style="font-size:.75rem;max-width:400px;word-break:break-all">'+(b[k]||'—')+'</td></tr>'; }); hh+='</tbody></table>'; } else hh='<p style="color:var(--muted);padding:.5rem 0">Nenhum banner detectado.</p>'; } else if (id === 'json') { hh = JSON.stringify(m, null, 2); } content.innerHTML = hh; }
+function metaKey(event,card){if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleMeta(card);}}
+function logout(){var cookie=document.cookie.split('; ').find(function(value){return value.split('=')[0].endsWith('_csrf');});var token=cookie?decodeURIComponent(cookie.split('=').slice(1).join('=')):'';fetch('/observe/api/auth/logout',{method:'POST',headers:{'x-csrf-token':token}}).finally(function(){location.href='/observe/login';});}
 function load(){
   fetch('/observe/api/assets/'+ASSET_ID,{headers:{'Accept':'application/json'}})
     .then(r=>r.ok?r.json():Promise.reject('HTTP '+r.status))
@@ -1063,11 +1086,11 @@ function render(a,svc,inc,chg,ifaces){
   }else{h+='<p style="color:var(--muted);padding:1rem">Nenhum serviço detectado.</p>';}
   h+='</div>';
 // Lazy metadata sections - collapsed by default, render on click
-  h+='<div class="card" style="margin-top:1.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="scan""><div class="card-title">🔍 Scan ▸</div><div class="meta-content" id="mc-scan" style="display:none"></div></div>';
-  h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="inference""><div class="card-title">🧠 Inferência ▸</div><div class="meta-content" id="mc-inference" style="display:none"></div></div>';
-  h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="snmp""><div class="card-title">📡 SNMP ▸</div><div class="meta-content" id="mc-snmp" style="display:none"></div></div>';
-  if (m.scan && m.scan.port_banners) h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="banners""><div class="card-title">🏷 Banners de Porta ▸</div><div class="meta-content" id="mc-banners" style="display:none"></div></div>';
-  h+='<div class="card" style="margin-top:.5rem;cursor:pointer" onclick="toggleMeta(this)" data-meta="json""><div class="card-title">📋 JSON Completo ▸</div><pre class="meta-json" id="mc-json" style="display:none"></pre></div>';
+  h+='<div class="card meta-toggle" style="margin-top:1.5rem" role="button" tabindex="0" aria-expanded="false" aria-controls="mc-scan" onclick="toggleMeta(this)" onkeydown="metaKey(event,this)" data-meta="scan"><div class="card-title">🔍 Scan ▸</div><div class="meta-content" id="mc-scan" style="display:none"></div></div>';
+  h+='<div class="card meta-toggle" style="margin-top:.5rem" role="button" tabindex="0" aria-expanded="false" aria-controls="mc-inference" onclick="toggleMeta(this)" onkeydown="metaKey(event,this)" data-meta="inference"><div class="card-title">🧠 Inferência ▸</div><div class="meta-content" id="mc-inference" style="display:none"></div></div>';
+  h+='<div class="card meta-toggle" style="margin-top:.5rem" role="button" tabindex="0" aria-expanded="false" aria-controls="mc-snmp" onclick="toggleMeta(this)" onkeydown="metaKey(event,this)" data-meta="snmp"><div class="card-title">📡 SNMP ▸</div><div class="meta-content" id="mc-snmp" style="display:none"></div></div>';
+  if (m.scan && m.scan.port_banners) h+='<div class="card meta-toggle" style="margin-top:.5rem" role="button" tabindex="0" aria-expanded="false" aria-controls="mc-banners" onclick="toggleMeta(this)" onkeydown="metaKey(event,this)" data-meta="banners"><div class="card-title">🏷 Banners de Porta ▸</div><div class="meta-content" id="mc-banners" style="display:none"></div></div>';
+  h+='<div class="card meta-toggle" style="margin-top:.5rem" role="button" tabindex="0" aria-expanded="false" aria-controls="mc-json" onclick="toggleMeta(this)" onkeydown="metaKey(event,this)" data-meta="json"><div class="card-title">📋 JSON Completo ▸</div><pre class="meta-json" id="mc-json" style="display:none"></pre></div>';
   window._assetMeta = m;
   window._r = r;
   document.getElementById('content').innerHTML=h;
@@ -1120,117 +1143,31 @@ const SYSTEM_SETTINGS_DEFAULTS = {
   },
 };
 
-let _systemSettings = { ...SYSTEM_SETTINGS_DEFAULTS };
-let _settingsLoaded = false;
+const { createSystemSettingsService } = require('./services/system-settings');
+const systemSettings = createSystemSettingsService({ db, defaults: SYSTEM_SETTINGS_DEFAULTS });
 
-function loadSystemSettings() {
-  // Recarrega dos env vars (runtime)
-  _systemSettings = {
-    discovery: {
-      scan_interval_minutes: parseInt(process.env.DISCOVERY_SCAN_INTERVAL_MINUTES || '60', 10),
-      arp_enabled: process.env.DISCOVERY_ARP_ENABLED !== 'false',
-      docker_enabled: process.env.DISCOVERY_DOCKER_ENABLED === 'true',
-      cloud_enabled: process.env.DISCOVERY_CLOUD_AWS_ENABLED === 'true',
-      passive_enabled: process.env.DISCOVERY_PASSIVE_LISTENERS_ENABLED !== 'false',
-      port_change_detection: process.env.DISCOVERY_PORT_CHANGE_DETECTION !== 'false',
-      port_disappeared_grace_scans: parseInt(process.env.DISCOVERY_PORT_DISAPPEARED_GRACE || '2', 10),
-      scan_parallel: parseInt(process.env.DISCOVERY_SCAN_PARALLEL || '20', 10),
-      extra_ports: (process.env.DISCOVERY_EXTRA_PORTS || ''),
-    },
-    agents: {
-      offline_threshold_minutes: Math.round(parseInt(process.env.AGENT_OFFLINE_THRESHOLD_MS || '300000', 10) / 60000),
-      offline_check_enabled: process.env.AGENT_OFFLINE_CHECK_ENABLED !== 'false',
-      check_interval_seconds: parseInt(process.env.CHECK_INTERVAL_MS || '60000', 10) / 1000,
-      disk_warn_percent: parseInt(process.env.DISK_WARN_PERCENT || '80', 10),
-      docker_projects: (process.env.OBSERVE_DOCKER_PROJECTS || ''),
-      docker_ignore_containers: (process.env.OBSERVE_DOCKER_IGNORE_CONTAINERS || ''),
-    },
-    certs: { ..._systemSettings.certs },
-    os_defaults: { ..._systemSettings.os_defaults },
-    ai: {
-      provider: process.env.AI_PROVIDER || 'mock',
-      model: process.env.AI_MODEL || 'auto',
-      auto_threshold: parseFloat(process.env.REMEDIATION_AUTO_THRESHOLD || '0.85'),
-      max_auto_severity: process.env.REMEDIATION_MAX_AUTO_SEVERITY || 'warning',
-    },
-    monitoring: { ..._systemSettings.monitoring },
-  };
-  _settingsLoaded = true;
-  return _systemSettings;
-}
-
-app.get(`${BASE}/system/settings`, requireAuth, (_req, res) => {
-  if (!_settingsLoaded) loadSystemSettings();
+app.get(`${BASE}/system/settings`, requireAuth, async (_req, res, next) => {
+  try {
+    const settings = await systemSettings.load();
   res.json({
-    ..._systemSettings,
+    ...settings,
     _meta: {
-      ai_provider_active: _systemSettings.ai.provider,
-      discovery_port_change_active: _systemSettings.discovery.port_change_detection,
-      agent_offline_active: _systemSettings.agents.offline_check_enabled,
-      cert_expiry_warning_days: _systemSettings.certs.expiry_warning_days,
+      ai_provider_active: settings.ai.provider,
+      discovery_port_change_active: settings.discovery.port_change_detection,
+      agent_offline_active: settings.agents.offline_check_enabled,
+      cert_expiry_warning_days: settings.certs.expiry_warning_days,
     },
   });
+  } catch (e) { next(e); }
 });
 
-app.post(`${BASE}/system/settings`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/system/settings`, requireAuth, requireAdmin, requireAdminWrite, async (req, res, next) => {
   const body = req.body || {};
-
-  // Atualiza apenas os campos enviados
-  if (body.discovery) {
-    if (typeof body.discovery.port_change_detection === 'boolean')
-      _systemSettings.discovery.port_change_detection = body.discovery.port_change_detection;
-    if (typeof body.discovery.port_disappeared_grace_scans === 'number')
-      _systemSettings.discovery.port_disappeared_grace_scans = body.discovery.port_disappeared_grace_scans;
-    if (typeof body.discovery.arp_enabled === 'boolean')
-      _systemSettings.discovery.arp_enabled = body.discovery.arp_enabled;
-    if (typeof body.discovery.docker_enabled === 'boolean')
-      _systemSettings.discovery.docker_enabled = body.discovery.docker_enabled;
-    if (typeof body.discovery.cloud_enabled === 'boolean')
-      _systemSettings.discovery.cloud_enabled = body.discovery.cloud_enabled;
-    if (typeof body.discovery.passive_enabled === 'boolean')
-      _systemSettings.discovery.passive_enabled = body.discovery.passive_enabled;
-    if (typeof body.discovery.scan_parallel === 'number')
-      _systemSettings.discovery.scan_parallel = body.discovery.scan_parallel;
-    if (typeof body.discovery.extra_ports === 'string')
-      _systemSettings.discovery.extra_ports = body.discovery.extra_ports;
-  }
-  if (body.agents) {
-    if (typeof body.agents.offline_check_enabled === 'boolean')
-      _systemSettings.agents.offline_check_enabled = body.agents.offline_check_enabled;
-    if (typeof body.agents.offline_threshold_minutes === 'number')
-      _systemSettings.agents.offline_threshold_minutes = body.agents.offline_threshold_minutes;
-    if (typeof body.agents.check_interval_seconds === 'number')
-      _systemSettings.agents.check_interval_seconds = body.agents.check_interval_seconds;
-    if (typeof body.agents.disk_warn_percent === 'number')
-      _systemSettings.agents.disk_warn_percent = body.agents.disk_warn_percent;
-    if (typeof body.agents.docker_projects === 'string')
-      _systemSettings.agents.docker_projects = body.agents.docker_projects;
-    if (typeof body.agents.docker_ignore_containers === 'string')
-      _systemSettings.agents.docker_ignore_containers = body.agents.docker_ignore_containers;
-  }
-  if (body.certs) {
-    if (typeof body.certs.expiry_warning_days === 'number')
-      _systemSettings.certs.expiry_warning_days = body.certs.expiry_warning_days;
-    if (typeof body.certs.expiry_critical_days === 'number')
-      _systemSettings.certs.expiry_critical_days = body.certs.expiry_critical_days;
-  }
-  if (body.os_defaults) {
-    if (typeof body.os_defaults.linux_node_exporter === 'boolean')
-      _systemSettings.os_defaults.linux_node_exporter = body.os_defaults.linux_node_exporter;
-    if (typeof body.os_defaults.windows_exporter === 'boolean')
-      _systemSettings.os_defaults.windows_exporter = body.os_defaults.windows_exporter;
-    if (typeof body.os_defaults.network_snmp === 'boolean')
-      _systemSettings.os_defaults.network_snmp = body.os_defaults.network_snmp;
-  }
-  if (body.ai) {
-    if (typeof body.ai.auto_threshold === 'number')
-      _systemSettings.ai.auto_threshold = body.ai.auto_threshold;
-    if (typeof body.ai.max_auto_severity === 'string')
-      _systemSettings.ai.max_auto_severity = body.ai.max_auto_severity;
-  }
-
-  log('info', 'System settings updated', { changed: Object.keys(body) });
-  res.json({ ok: true, settings: _systemSettings });
+  try {
+    const settings = await systemSettings.update(body);
+    log('info', 'System settings updated', { changed: Object.keys(body) });
+    res.json({ ok: true, settings });
+  } catch (e) { next(e); }
 });
 
 // Endpoint de status ao vivo para feedback na UI
@@ -1256,7 +1193,7 @@ app.get(`${BASE}/system/status`, requireAuth, async (_req, res) => {
       ai: aiStatus.status === 'fulfilled' ? aiStatus.value : { status: 'unknown' },
       agents: agentStatus.status === 'fulfilled' ? agentStatus.value : { total: 0, online: 0, offline: 0 },
       discovery: discoveryStatus.status === 'fulfilled' ? discoveryStatus.value : { total_assets: 0 },
-      settings: _settingsLoaded ? _systemSettings : loadSystemSettings(),
+      settings: await systemSettings.load(),
     });
   } catch (e) {
     res.json({ error: e.message });
@@ -1272,8 +1209,8 @@ app.get(`${BASE}/assets/:id`, requireAuth, async (req, res) => {
               primary_ip, hostname, lifecycle_state, criticality, confidence,
               metadata, first_seen_at, last_seen_at, created_at, updated_at
        FROM observe_assets
-       WHERE id = $1::uuid AND tenant_id = 'default'`,
-      [req.params.id]
+       WHERE id = $1::uuid AND tenant_id = $2`,
+      [req.params.id, req.auth.tenantId || 'default']
     ).catch(() => ({ rows: [] }));
     if (!asset.rows.length) { await pool.end().catch(()=>{}); return res.status(404).json({ error: 'Ativo não encontrado' }); }
     
@@ -1281,30 +1218,30 @@ app.get(`${BASE}/assets/:id`, requireAuth, async (req, res) => {
       pool.query(
         `SELECT service_name, protocol, port, status, fingerprint, first_seen_at, last_seen_at
          FROM observe_asset_services
-         WHERE asset_id = $1::uuid AND tenant_id = 'default'
+         WHERE asset_id = $1::uuid AND tenant_id = $2
          ORDER BY port`,
-        [req.params.id]
+        [req.params.id, req.auth.tenantId || 'default']
       ).catch(() => ({ rows: [] })),
       pool.query(
         `SELECT i.id, i.title, i.severity, i.status, i.ai_summary, i.ai_suggestion, i.created_at
          FROM observe_incidents i
-         WHERE i.host_id = $1::uuid
+         WHERE i.host_id = $1::uuid AND i.tenant_id = $2
          ORDER BY i.created_at DESC LIMIT 20`,
-        [req.params.id]
+        [req.params.id, req.auth.tenantId || 'default']
       ).catch(() => ({ rows: [] })),
       pool.query(
         `SELECT change_type, field_name, old_value, new_value, changed_at
          FROM observe_asset_changes
-         WHERE asset_id = $1::uuid AND tenant_id = 'default'
+         WHERE asset_id = $1::uuid AND tenant_id = $2
          ORDER BY changed_at DESC LIMIT 30`,
-        [req.params.id]
+        [req.params.id, req.auth.tenantId || 'default']
       ).catch(() => ({ rows: [] })),
       pool.query(
         `SELECT iface_name, iface_type, mac_address, ip_addresses, speed_mbps, status
          FROM observe_asset_interfaces
-         WHERE asset_id = $1::uuid AND tenant_id = 'default'
+         WHERE asset_id = $1::uuid AND tenant_id = $2
          ORDER BY iface_name`,
-        [req.params.id]
+        [req.params.id, req.auth.tenantId || 'default']
       ).catch(() => ({ rows: [] }))
     ]);
     await pool.end().catch(() => {});
@@ -1371,7 +1308,7 @@ app.get(`${BASE}/ai/settings`, requireAuth, async (_req, res) => {
 });
 
 // AI settings — atualiza provider/model/api_key em runtime
-app.post(`${BASE}/ai/settings`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/ai/settings`, requireAuth, requireAdmin, requireAIWrite, async (req, res) => {
   const body = req.body || {};
   const provider = Object.prototype.hasOwnProperty.call(body, 'provider')
     ? String(body.provider || '').toLowerCase()
@@ -1421,8 +1358,58 @@ app.post(`${BASE}/ai/settings`, requireAuth, requireAdmin, async (req, res) => {
   });
 });
 
+// ─── AIOps endpoints (proxy para observe-ai) ────────────────────────────
+
+// RCA — Root Cause Analysis
+app.post(`${BASE}/ai/rca`, requireAuth, async (req, res) => {
+  const { incident, topology, recent_events, similar_incidents } = req.body;
+  if (!incident) return res.status(400).json({ error: 'incident é obrigatório' });
+  const result = await proxyToAI('/ai/rca', { method: 'POST', body: JSON.stringify({ incident, topology, recent_events, similar_incidents }) });
+  res.status(result.status).json(result.data);
+});
+
+// Event Correlation
+app.post(`${BASE}/ai/correlate`, requireAuth, async (req, res) => {
+  const { events, mode } = req.body;
+  if (!Array.isArray(events)) return res.status(400).json({ error: 'events deve ser um array' });
+  const result = await proxyToAI('/ai/correlate', { method: 'POST', body: JSON.stringify({ events, mode }) });
+  res.status(result.status).json(result.data);
+});
+
+// Similar Incidents Search
+app.post(`${BASE}/ai/similar-incidents`, requireAuth, async (req, res) => {
+  const { incident, min_similarity, max_results } = req.body;
+  if (!incident) return res.status(400).json({ error: 'incident é obrigatório' });
+  const result = await proxyToAI('/ai/similar-incidents', { method: 'POST', body: JSON.stringify({ incident, min_similarity, max_results }) });
+  res.status(result.status).json(result.data);
+});
+
+// Knowledge Base Playbooks
+app.get(`${BASE}/ai/playbooks`, requireAuth, async (req, res) => {
+  const qs = new URLSearchParams(req.query).toString();
+  const result = await proxyToAI(`/ai/playbooks${qs ? '?' + qs : ''}`);
+  res.status(result.status).json(result.data);
+});
+
+// Feedback
+app.post(`${BASE}/ai/feedback`, requireAuth, async (req, res) => {
+  const result = await proxyToAI('/ai/feedback', { method: 'POST', body: JSON.stringify(req.body) });
+  res.status(result.status).json(result.data);
+});
+
+app.get(`${BASE}/ai/feedback/stats`, requireAuth, async (req, res) => {
+  const qs = new URLSearchParams(req.query).toString();
+  const result = await proxyToAI(`/ai/feedback/stats${qs ? '?' + qs : ''}`);
+  res.status(result.status).json(result.data);
+});
+
+app.get(`${BASE}/ai/incidents/stats`, requireAuth, async (_req, res) => {
+  const result = await proxyToAI('/ai/incidents/stats');
+  res.status(result.status).json(result.data);
+});
+
 // Remediation request (manual)
-app.post(`${BASE}/remediation/request`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/remediation/request`, requireAuth, requireAdmin, requireRemediationWrite, validateBody(bodySchemas.remediationRequest), async (req, res) => {
   const { incident_id, action, params, reason } = req.body;
   if (!incident_id || !action) return res.status(400).json({ error: 'incident_id e action são obrigatórios' });
   try {
@@ -1453,7 +1440,7 @@ app.get(`${BASE}/remediation/pending`, requireAuth, apiLimiter, async (_req, res
 });
 
 // Aprova e enfileira remediação para execução pelo worker
-app.post(`${BASE}/remediation/:id/approve`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/remediation/:id/approve`, requireAuth, requireAdmin, requireRemediationWrite, validateBody(bodySchemas.remediationApprove), async (req, res) => {
   const { id } = req.params;
   const { approved_by } = req.body;
   try {
@@ -1480,7 +1467,7 @@ app.post(`${BASE}/remediation/:id/approve`, requireAuth, requireAdmin, async (re
 });
 
 // Rejeita remediação
-app.post(`${BASE}/remediation/:id/reject`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/remediation/:id/reject`, requireAuth, requireAdmin, requireRemediationWrite, validateBody(bodySchemas.remediationReject), async (req, res) => {
   const { id } = req.params;
   const { rejected_by, reason } = req.body;
   try {
@@ -1600,7 +1587,7 @@ app.get(`${BASE}/ai/catalog`, requireAuth, async (_req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post(`${BASE}/ai/catalog`, requireAuth, requireAdmin, async (req, res) => {
+app.post(`${BASE}/ai/catalog`, requireAuth, requireAdmin, requireAIWrite, async (req, res) => {
   const { action, description, risk, params, auto_ok, max_severity } = req.body;
   if (!action || !description) return res.status(400).json({ error: 'action e description são obrigatórios' });
   try {
@@ -1614,7 +1601,7 @@ app.post(`${BASE}/ai/catalog`, requireAuth, requireAdmin, async (req, res) => {
   } catch (e) { res.status(e.message.includes('unique') ? 409 : 500).json({ error: e.message }); }
 });
 
-app.patch(`${BASE}/ai/catalog/:action`, requireAuth, requireAdmin, async (req, res) => {
+app.patch(`${BASE}/ai/catalog/:action`, requireAuth, requireAdmin, requireAIWrite, async (req, res) => {
   const { action } = req.params;
   const { description, risk, params, auto_ok, max_severity, enabled } = req.body;
   try {
@@ -1636,7 +1623,7 @@ app.patch(`${BASE}/ai/catalog/:action`, requireAuth, requireAdmin, async (req, r
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete(`${BASE}/ai/catalog/:action`, requireAuth, requireAdmin, async (req, res) => {
+app.delete(`${BASE}/ai/catalog/:action`, requireAuth, requireAdmin, requireAIWrite, async (req, res) => {
   try {
     const r = await db.query(
       `UPDATE observe_ai_catalog SET enabled = false, updated_at = NOW()
@@ -1649,25 +1636,32 @@ app.delete(`${BASE}/ai/catalog/:action`, requireAuth, requireAdmin, async (req, 
 });
 
 // ─── UI: login web ──────────────────────────────────────────────────────────
-app.get('/observe/login', (_req, res) => {
+app.get('/observe/login', async (req, res) => {
+  const auth = await authenticateRequest(req).catch(() => null);
+  if (auth) return res.redirect('/observe/home');
   res.set('Content-Type', 'text/html; charset=utf-8');
   res.end(LOGIN_HTML);
 });
 
 // ─── UI: página de configuração do provider de IA ─────────────────────────────
-app.get('/observe/settings', (_req, res) => {
+app.get('/observe/settings', requireWebSession, (_req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.end(SETTINGS_HTML);
+});
+
+app.get('/observe/config', requireWebSession, (_req, res) => {
   res.set('Content-Type', 'text/html; charset=utf-8');
   res.end(SETTINGS_HTML);
 });
 
 // ─── UI: home com atalhos das interfaces ────────────────────────────────────
-app.get('/observe/home', (_req, res) => {
+app.get('/observe/home', requireWebSession, (_req, res) => {
   res.set('Content-Type', 'text/html; charset=utf-8');
   res.end(HOME_HTML);
 });
 
 // ─── UI: dashboard de atividade da IA ─────────────────────────────────────────
-app.get('/observe/ai', (_req, res) => {
+app.get('/observe/ai', requireWebSession, (_req, res) => {
   res.set('Content-Type', 'text/html; charset=utf-8');
   res.end(AI_DASHBOARD_HTML);
 });
@@ -1676,18 +1670,19 @@ app.get('/observe/ai', (_req, res) => {
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
 // ─── Error handler ────────────────────────────────────────────────────────────
-app.use((err, _req, res, _next) => {
-  log('error', 'Unhandled error', { err: err.message });
-  res.status(500).json({ error: 'Internal server error' });
-});
+app.use(createHttpErrorHandler({ log, service: 'r-observe-api' }));
+
+const { createMetricsUpdater } = require('./services/metrics-updater');
+
+// ─── Periodic metrics updater ─────────────────────────────────────────────
+const metricsUpdater = createMetricsUpdater({ db, activeIncidentsGauge, activeSessionsGauge, log });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-const { runMigrations } = require('./migrate');
 const { bootstrapInitialUsers } = require('./bootstrap');
 
 (async () => {
   try {
-    await runMigrations(db);
+    await initAuth();
     await bootstrapInitialUsers(db, process.env, { log: (line) => process.stdout.write(line + '\n') });
     await applyPersistedAISettingsOnStartup();
 
@@ -1698,6 +1693,8 @@ const { bootstrapInitialUsers } = require('./bootstrap');
       });
     }, AI_SETTINGS_RECONCILE_INTERVAL_MS);
     timer.unref();
+
+    metricsUpdater.start();
   } catch (e) {
     log('error', 'Startup bootstrap failed', { err: e.message });
     await db.end().catch(() => {});
@@ -1731,6 +1728,7 @@ const LOGIN_HTML = /* html */`<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>R-Observe · Login</title>
+  <link rel="icon" href="/results-brand/favicon.svg" type="image/svg+xml">
   <style>
     :root { color-scheme: dark; --bg:#0d1117; --surface:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --brand:#cc1212; --err:#f85149; }
     * { box-sizing:border-box; }
@@ -1742,6 +1740,7 @@ const LOGIN_HTML = /* html */`<!DOCTYPE html>
     p { margin:2px 0 0; color:var(--muted); }
     label { display:block; color:var(--muted); font-size:.82rem; margin:14px 0 6px; }
     input { width:100%; border:1px solid var(--border); border-radius:6px; background:#0d1117; color:var(--text); padding:11px 12px; font:inherit; }
+    input:focus-visible, button:focus-visible { outline:3px solid #fff; outline-offset:2px; }
     button { width:100%; margin-top:18px; border:0; border-radius:6px; background:var(--brand); color:#fff; padding:11px 14px; font-weight:800; cursor:pointer; }
     button:disabled { opacity:.65; cursor:not-allowed; }
     .error { min-height:1.3em; margin-top:12px; color:var(--err); font-size:.9rem; }
@@ -1757,11 +1756,11 @@ const LOGIN_HTML = /* html */`<!DOCTYPE html>
       </div>
     </div>
     <label for="username">Usuário</label>
-    <input id="username" name="username" autocomplete="username" autofocus>
+    <input id="username" name="username" autocomplete="username" required aria-describedby="error" autofocus>
     <label for="password">Senha</label>
-    <input id="password" name="password" type="password" autocomplete="current-password">
+    <input id="password" name="password" type="password" autocomplete="current-password" required aria-describedby="error">
     <button id="submit" type="submit">Entrar</button>
-    <div id="error" class="error"></div>
+    <div id="error" class="error" role="alert" aria-live="assertive"></div>
   </form>
   <script>
     const API = '/observe/api';
@@ -2003,15 +2002,15 @@ const AI_DASHBOARD_HTML = /* html */`<!DOCTYPE html>
   <span id="last-refresh" style="color:var(--muted);font-size:.75rem;margin-left:.25rem"></span>
 </div>
 
-<nav role="tablist">
-  <button class="tab active" role="tab" aria-selected="true"  onclick="showTab('overview')">Visão Geral</button>
-  <button class="tab" role="tab" aria-selected="false" onclick="showTab('analyses')">Análises</button>
-  <button class="tab" role="tab" aria-selected="false" onclick="showTab('catalog')">Catálogo</button>
-  <button class="tab" role="tab" aria-selected="false" onclick="showTab('remediations')">Remediações</button>
-  <button class="tab" role="tab" aria-selected="false" onclick="showTab('contacts')">Contatos</button>
+<nav role="tablist" aria-label="Seções do dashboard de IA">
+  <button id="tab-overview" class="tab active" role="tab" aria-selected="true" aria-controls="overview" tabindex="0" onclick="showTab('overview')">Visão Geral</button>
+  <button id="tab-analyses" class="tab" role="tab" aria-selected="false" aria-controls="analyses" tabindex="-1" onclick="showTab('analyses')">Análises</button>
+  <button id="tab-catalog" class="tab" role="tab" aria-selected="false" aria-controls="catalog" tabindex="-1" onclick="showTab('catalog')">Catálogo</button>
+  <button id="tab-remediations" class="tab" role="tab" aria-selected="false" aria-controls="remediations" tabindex="-1" onclick="showTab('remediations')">Remediações</button>
+  <button id="tab-contacts" class="tab" role="tab" aria-selected="false" aria-controls="contacts" tabindex="-1" onclick="showTab('contacts')">Contatos</button>
 </nav>
 
-<div id="overview" class="page active">
+<div id="overview" class="page active" role="tabpanel" aria-labelledby="tab-overview">
   <div class="metrics" id="metrics-grid">
     <div class="metric"><div class="val">—</div><div class="lbl">Analisados</div></div>
   </div>
@@ -2028,7 +2027,7 @@ const AI_DASHBOARD_HTML = /* html */`<!DOCTYPE html>
   </div>
 </div>
 
-<div id="analyses" class="page">
+<div id="analyses" class="page" role="tabpanel" aria-labelledby="tab-analyses" hidden>
   <div class="section-title">Todas as Análises <span style="font-weight:400;color:var(--muted);font-size:.8rem">— últimas 20</span></div>
   <div class="table-wrap">
   <table id="analyses-table">
@@ -2038,7 +2037,7 @@ const AI_DASHBOARD_HTML = /* html */`<!DOCTYPE html>
   </div>
 </div>
 
-<div id="catalog" class="page">
+<div id="catalog" class="page" role="tabpanel" aria-labelledby="tab-catalog" hidden>
   <div class="section-title">Catálogo de Remediações</div>
   <div class="table-wrap">
   <table id="catalog-table">
@@ -2048,7 +2047,7 @@ const AI_DASHBOARD_HTML = /* html */`<!DOCTYPE html>
   </div>
 </div>
 
-<div id="remediations" class="page">
+<div id="remediations" class="page" role="tabpanel" aria-labelledby="tab-remediations" hidden>
   <div class="section-title">Remediações Recentes <span style="font-weight:400;color:var(--muted);font-size:.8rem">— últimas 20</span></div>
   <div class="table-wrap">
   <table id="rem-table">
@@ -2058,15 +2057,15 @@ const AI_DASHBOARD_HTML = /* html */`<!DOCTYPE html>
   </div>
 </div>
 
-<div id="contacts" class="page">
+<div id="contacts" class="page" role="tabpanel" aria-labelledby="tab-contacts" hidden>
   <div class="section-title">Contatos Operacionais</div>
   <div style="display:grid;grid-template-columns:minmax(220px,320px) 1fr;gap:14px;align-items:start">
     <form onsubmit="createContact(event)" style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px">
       <div style="font-weight:700;margin-bottom:10px">Novo contato</div>
-      <label style="display:block;color:var(--muted);font-size:.8rem;margin-bottom:4px">Usuário</label>
-      <input id="contact-name" style="width:100%;margin-bottom:8px" placeholder="operador@results">
-      <label style="display:block;color:var(--muted);font-size:.8rem;margin-bottom:4px">Senha inicial</label>
-      <input id="contact-password" type="password" style="width:100%;margin-bottom:8px" placeholder="mínimo 8 caracteres">
+      <label for="contact-name" style="display:block;color:var(--muted);font-size:.8rem;margin-bottom:4px">Usuário</label>
+      <input id="contact-name" style="width:100%;margin-bottom:8px" placeholder="operador@results" required>
+      <label for="contact-password" style="display:block;color:var(--muted);font-size:.8rem;margin-bottom:4px">Senha inicial</label>
+      <input id="contact-password" type="password" style="width:100%;margin-bottom:8px" placeholder="mínimo 8 caracteres" minlength="8" required>
       <label style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><input id="contact-admin" type="checkbox"> Administrador</label>
       <button class="btn btn-primary btn-sm" type="submit">Criar</button>
     </form>
@@ -2079,14 +2078,18 @@ const AI_DASHBOARD_HTML = /* html */`<!DOCTYPE html>
   </div>
 </div>
 
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 const API = '/observe/api';
 let _data = {};
 
 function getHeaders() {
-  return { 'Content-Type': 'application/json' };
+  const csrf = document.cookie.split('; ').find(value => value.split('=')[0].endsWith('_csrf'));
+  return {
+    'Content-Type': 'application/json',
+    ...(csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf.split('=').slice(1).join('=')) } : {}),
+  };
 }
 
 function redirectLogin() {
@@ -2099,13 +2102,28 @@ async function logout() {
 }
 
 function showTab(id) {
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
-  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('.page').forEach(p => { p.classList.remove('active'); p.hidden = true; });
+  document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); t.tabIndex = -1; });
+  const panel = document.getElementById(id);
+  panel.classList.add('active');
+  panel.hidden = false;
   const activeTab = document.querySelector('[onclick="showTab(\\''+id+'\\')"]');
   activeTab.classList.add('active');
   activeTab.setAttribute('aria-selected', 'true');
+  activeTab.tabIndex = 0;
 }
+
+document.querySelector('[role="tablist"]').addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const current = tabs.indexOf(document.activeElement);
+  if (current < 0) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 :
+    (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[next].click();
+  tabs[next].focus();
+});
 
 function toast(msg, ok) {
   const el = document.getElementById('toast');
@@ -2261,8 +2279,8 @@ function renderAnalyses(rows) {
     '<td><div class="ai-text">' + esc(r.ai_cause || '—') + '</div></td>' +
     '<td><div class="ai-text">' + esc(r.ai_suggestion || '—') + '</div></td>' +
     '<td><div class="feedback-bar">' +
-      '<button class="btn btn-sm" style="background:#1a7f3733;color:var(--green)" onclick="sendFeedback(\\''+r.id+'\\',1)">👍</button>' +
-      '<button class="btn btn-sm" style="background:#da363333;color:var(--red)"   onclick="sendFeedback(\\''+r.id+'\\',-1)">👎</button>' +
+      '<button class="btn btn-sm" aria-label="Marcar análise como útil" style="background:#1a7f3733;color:var(--green)" onclick="sendFeedback(\\''+r.id+'\\',1)">👍</button>' +
+      '<button class="btn btn-sm" aria-label="Marcar análise como não útil" style="background:#da363333;color:var(--red)" onclick="sendFeedback(\\''+r.id+'\\',-1)">👎</button>' +
     '</div></td>' +
   '</tr>').join('');
 }
@@ -2374,7 +2392,6 @@ setInterval(loadAll, 30000);
 </script>
 </body>
 </html>`;
-
 const SETTINGS_HTML = /* html */`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -2405,17 +2422,17 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
   </div>
 
   <!-- Tabs -->
-  <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('discovery')">🔍 Descoberta</button>
-    <button class="tab-btn" onclick="switchTab('ai')">🤖 IA</button>
-    <button class="tab-btn" onclick="switchTab('agents')">📡 Agentes</button>
-    <button class="tab-btn" onclick="switchTab('os')">💻 SO</button>
-    <button class="tab-btn" onclick="switchTab('certs')">🔒 Certs</button>
-    <button class="tab-btn" onclick="switchTab('monitoring')">📊 Monitoramento</button>
+  <div class="tabs" role="tablist" aria-label="Seções de configuração">
+    <button id="settings-tab-discovery" class="tab-btn active" role="tab" aria-selected="true" aria-controls="settings-panel" tabindex="0" data-tab="discovery" onclick="switchTab('discovery')">🔍 Descoberta</button>
+    <button id="settings-tab-ai" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="ai" onclick="switchTab('ai')">🤖 IA</button>
+    <button id="settings-tab-agents" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="agents" onclick="switchTab('agents')">📡 Agentes</button>
+    <button id="settings-tab-os" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="os" onclick="switchTab('os')">💻 SO</button>
+    <button id="settings-tab-certs" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="certs" onclick="switchTab('certs')">🔒 Certs</button>
+    <button id="settings-tab-monitoring" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="monitoring" onclick="switchTab('monitoring')">📊 Monitoramento</button>
   </div>
 
   <div class="settings-layout">
-    <div class="settings-panel" id="settings-panel">
+    <div class="settings-panel" id="settings-panel" role="tabpanel" aria-labelledby="settings-tab-discovery">
       <!-- Content rendered dynamically by switchTab() -->
     </div>
 
@@ -2432,8 +2449,9 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
       <div class="aside-panel">
         <div class="panel-title">Ações</div>
         <button class="btn btn-secondary" onclick="loadStatus()" style="width:100%;margin-bottom:.5rem">↺ Atualizar Status</button>
-        <button class="btn btn-primary" onclick="saveAllSettings()" style="width:100%">💾 Salvar Tudo</button>
-        <div id="feedback" style="margin-top:1rem"></div>
+        <button id="save-section-btn" class="btn btn-primary" onclick="saveAllSettings()" style="width:100%" disabled>💾 Salvar seção</button>
+        <div id="dirty-status" class="hint" role="status" aria-live="polite" style="margin-top:.75rem">Nenhuma alteração pendente.</div>
+        <div id="feedback" role="status" aria-live="polite" style="margin-top:1rem"></div>
       </div>
     </div>
   </div>
@@ -2445,6 +2463,8 @@ let _allSettings = {};
 let _aiProvider = 'mock';
 let _aiModel = 'auto';
 let _aiLoaded = false;
+let _activeSettingsTab = null;
+let _settingsReady = false;
 const AUTO_LABELS = { openai:'gpt-4o-mini', anthropic:'claude-haiku-4-5-20251001', deepseek:'deepseek-chat' };
 
 function h(tag, attrs, ...children) {
@@ -2455,7 +2475,7 @@ function h(tag, attrs, ...children) {
 }
 
 function toggle(id) {
-  return h('label', {className:'toggle-row'}, [
+  return h('div', {className:'toggle-row'}, [
     h('span', {}, [h('span', {className:'toggle-label'}, id), h('div', {className:'toggle-desc'}, '')]),
     h('label', {className:'toggle-switch'}, [
       h('input', {type:'checkbox', id:'tog-'+id, onchange:'markDirty()'}),
@@ -2480,19 +2500,26 @@ function numberField(id,label,val,unit) {
 }
 
 let _dirty = false;
-function markDirty(){ _dirty=true; }
+function markDirty(){
+  _dirty=true;
+  document.getElementById('save-section-btn').disabled=false;
+  document.getElementById('dirty-status').textContent='Alterações não salvas nesta seção.';
+}
 function saveAllSettings(){
-  const p = document.getElementById('settings-panel');
   const body = readCurrentSettings();
+  const button = document.getElementById('save-section-btn');
+  button.disabled=true;
   fetch(API+'/system/settings',{method:'POST',headers:getHeaders(),body:JSON.stringify(body)})
-    .then(r=>r.json()).then(d=>{
+    .then(async r=>({ok:r.ok,data:await r.json()})).then(({ok,data:d})=>{
+      if(!ok) throw new Error(d.error||'Não foi possível salvar');
       _dirty=false;
+      document.getElementById('dirty-status').textContent='Nenhuma alteração pendente.';
       showFeedback(d.ok?'Configuração salva com sucesso':'Erro ao salvar',d.ok);
-    }).catch(e=>showFeedback('Erro: '+e.message,false));
+    }).catch(e=>{button.disabled=false;showFeedback('Erro: '+e.message,false);});
 }
 function readCurrentSettings(){
-  return {
-    discovery: {
+  if(_activeSettingsTab==='discovery') return { discovery: {
+      scan_interval_minutes: parseInt(document.getElementById('sld-scan_interval')?.value||60),
       port_change_detection: document.getElementById('tog-port_change')?.checked,
       port_disappeared_grace_scans: parseInt(document.getElementById('sld-grace')?.value||2),
       arp_enabled: document.getElementById('tog-discovery_arp')?.checked,
@@ -2501,21 +2528,29 @@ function readCurrentSettings(){
       passive_enabled: document.getElementById('tog-discovery_passive')?.checked,
       scan_parallel: parseInt(document.getElementById('sld-scan_parallel')?.value||20),
       extra_ports: document.getElementById('txt-extra_ports')?.value || '',
-    },
-    agents: {
+    }};
+  if(_activeSettingsTab==='agents') return { agents: {
       offline_check_enabled: document.getElementById('tog-agent_offline')?.checked,
       offline_threshold_minutes: parseInt(document.getElementById('sld-agent_timeout')?.value||5),
-    },
-    certs: {
+      check_interval_seconds: parseInt(document.getElementById('sld-agent_check_interval')?.value||60),
+      disk_warn_percent: parseInt(document.getElementById('sld-agent_disk_warn')?.value||80),
+      docker_projects: [...(document.getElementById('sel-docker_projects')?.selectedOptions||[])].map(o=>o.value).join(','),
+      docker_ignore_containers: [...(document.getElementById('sel-docker_ignore')?.selectedOptions||[])].map(o=>o.value).join(','),
+    }};
+  if(_activeSettingsTab==='certs') return { certs: {
       expiry_warning_days: parseInt(document.getElementById('sld-cert_warn')?.value||30),
       expiry_critical_days: parseInt(document.getElementById('sld-cert_crit')?.value||7),
-    },
-    os_defaults: {
+    }};
+  if(_activeSettingsTab==='os') return { os_defaults: {
       linux_node_exporter: document.getElementById('tog-os_linux')?.checked,
       windows_exporter: document.getElementById('tog-os_win')?.checked,
       network_snmp: document.getElementById('tog-os_snmp')?.checked,
-    },
-  };
+    }};
+  if(_activeSettingsTab==='monitoring') return { monitoring: {
+      icinga_sync_enabled: document.getElementById('tog-mon_icinga')?.checked,
+      prometheus_sd_enabled: document.getElementById('tog-mon_prometheus')?.checked,
+    }};
+  return {};
 }
 
 function showFeedback(msg,ok){
@@ -2525,8 +2560,22 @@ function showFeedback(msg,ok){
 }
 
 function switchTab(tab){
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active',b.textContent.includes(
-    tab==='discovery'?'Descoberta':tab==='ai'?'IA':tab==='agents'?'Agentes':tab==='os'?'SO':tab==='certs'?'Certs':'Monitoramento')));
+  if(_activeSettingsTab && tab!==_activeSettingsTab && _dirty && !confirm('Descartar as alterações não salvas desta seção?')) return;
+  if(tab!==_activeSettingsTab){
+    _dirty=false;
+    document.getElementById('save-section-btn').disabled=true;
+    document.getElementById('dirty-status').textContent='Nenhuma alteração pendente.';
+  }
+  _activeSettingsTab=tab;
+  document.getElementById('save-section-btn').hidden=tab==='ai';
+  document.getElementById('dirty-status').hidden=tab==='ai';
+  document.querySelectorAll('.tab-btn').forEach(b=>{
+    const active=b.dataset.tab===tab;
+    b.classList.toggle('active',active);
+    b.setAttribute('aria-selected',String(active));
+    b.tabIndex=active?0:-1;
+  });
+  document.getElementById('settings-panel').setAttribute('aria-labelledby','settings-tab-'+tab);
   const p=document.getElementById('settings-panel');
   if(tab==='discovery') renderDiscovery(p);
   else if(tab==='ai') renderAI(p);
@@ -2536,38 +2585,46 @@ function switchTab(tab){
   else if(tab==='monitoring') renderMonitoring(p);
 }
 
+document.querySelector('.tabs[role="tablist"]').addEventListener('keydown',event=>{
+  if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  const tabs=[...document.querySelectorAll('.tab-btn')];
+  const current=tabs.indexOf(document.activeElement);
+  if(current<0)return;
+  event.preventDefault();
+  const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:
+    (current+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+  tabs[next].click();tabs[next].focus();
+});
+
+addEventListener('beforeunload',event=>{if(_dirty){event.preventDefault();event.returnValue='';}});
+
 // ── Discovery Tab ──
 function renderDiscovery(el){
+  const s=_allSettings.discovery||{};
   el.innerHTML='';
   el.appendChild(h('div',{className:'panel-title'},'Configuração de Descoberta'));
   el.appendChild(h('div',{className:'field'},[
-    h('label',{},'Intervalo de Scan'),slider('scan_interval',1,1440,5,60,' min')
+    h('label',{for:'sld-scan_interval'},'Intervalo de Scan'),slider('scan_interval',1,1440,5,s.scan_interval_minutes??60,' min')
   ]));
   el.appendChild(h('div',{className:'field'},[
     h('div',{},toggle('port_change')),
     h('div',{className:'toggle-desc'},'Detectar portas que abriram ou fecharam entre scans'),
     h('div',{style:'margin-top:.8rem'},[
-      h('label',{},'Scans antes de alertar porta fechada'),
-      slider('grace',1,10,1,2,' scans')
+      h('label',{for:'sld-grace'},'Scans antes de alertar porta fechada'),
+      slider('grace',1,10,1,s.port_disappeared_grace_scans??2,' scans')
     ])
   ]));
-  document.getElementById('tog-port_change').checked=true;
-  document.getElementById('sld-scan_interval').value=60;document.getElementById('sldv-scan_interval').textContent='60 min';
-  document.getElementById('sld-grace').value=2;document.getElementById('sldv-grace').textContent='2 scans';
-  el.appendChild(h('div',{className:'field'},[h('div',{},toggle('snmp_discovery')),h('div',{className:'toggle-desc'},'Ativar descoberta SNMP (sysDescr, OS, interfaces)')]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'SNMP Community'),h('input',{type:'text',id:'txt-snmp_community',value:'public',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',onchange:'markDirty()'})]));
-  document.getElementById('tog-snmp_discovery').checked=false;
+  document.getElementById('tog-port_change').checked=s.port_change_detection??true;
   el.appendChild(h('div',{className:'field'},[toggle('discovery_arp'),h('div',{className:'toggle-desc'},'Descoberta via ARP (rede local)')]));
   el.appendChild(h('div',{className:'field'},[toggle('discovery_docker'),h('div',{className:'toggle-desc'},'Descoberta de contêineres Docker')]));
   el.appendChild(h('div',{className:'field'},[toggle('discovery_cloud'),h('div',{className:'toggle-desc'},'Descoberta de recursos Cloud (AWS)')]));
   el.appendChild(h('div',{className:'field'},[toggle('discovery_passive'),h('div',{className:'toggle-desc'},'Listeners passivos (syslog, netflow, traps)')]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Scans paralelos'),slider('scan_parallel',1,100,1,20,'')]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Portas extras (separadas por vírgula)'),h('input',{type:'text',id:'txt-extra_ports',value:'',placeholder:'Ex: 8080,8443,9090',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',onchange:'markDirty()'})]));
-  document.getElementById('tog-discovery_arp').checked=true;
-  document.getElementById('tog-discovery_docker').checked=true;
-  document.getElementById('tog-discovery_cloud').checked=false;
-  document.getElementById('tog-discovery_passive').checked=true;
-  document.getElementById('sld-scan_parallel').value=20;document.getElementById('sldv-scan_parallel').textContent='20';
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sld-scan_parallel'},'Scans paralelos'),slider('scan_parallel',1,100,1,s.scan_parallel??20,'')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'txt-extra_ports'},'Portas extras (separadas por vírgula)'),h('input',{type:'text',id:'txt-extra_ports',value:s.extra_ports||'',placeholder:'Ex: 8080,8443,9090',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',onchange:'markDirty()'})]));
+  document.getElementById('tog-discovery_arp').checked=s.arp_enabled??true;
+  document.getElementById('tog-discovery_docker').checked=s.docker_enabled??false;
+  document.getElementById('tog-discovery_cloud').checked=s.cloud_enabled??false;
+  document.getElementById('tog-discovery_passive').checked=s.passive_enabled??true;
 }
 // ── AI Tab ──
 function renderAI(el){
@@ -2588,16 +2645,16 @@ function renderAI(el){
       h('div',{className:'effective-model',id:'effective-model'},'')
     ]));
     el.appendChild(h('div',{className:'field',id:'api-key-section'},[
-      h('label',{},'API Key'),
+      h('label',{for:'api-key'},'API Key'),
       h('div',{className:'key-row'},[
         h('input',{type:'password',id:'api-key',placeholder:'Cole a chave aqui',autocomplete:'new-password',oninput:'markDirty()'}),
-        h('button',{className:'toggle-btn',onclick:'toggleKey()'},'👁')
+        h('button',{className:'toggle-btn',type:'button',onclick:'toggleKey()','aria-label':'Mostrar ou ocultar API key'},'👁')
       ]),
       h('div',{className:'hint'},'Deixe em branco para manter a chave atual.')
     ]));
   }
   el.appendChild(h('div',{className:'field'},[
-    h('label',{},'Auto-Remediation Threshold'),slider('ai_threshold',0,100,5,85,'%'),
+    h('label',{for:'sld-ai_threshold'},'Auto-Remediation Threshold'),slider('ai_threshold',0,100,5,85,'%'),
     h('div',{className:'hint'},'Score mínimo para execução automática de remediações')
   ]));
   el.appendChild(h('div',{className:'actions'},[
@@ -2608,52 +2665,61 @@ function renderAI(el){
 }
 // ── Agents Tab ──
 function renderAgents(el){
+  const s=_allSettings.agents||{};
   el.innerHTML='';
   el.appendChild(h('div',{className:'panel-title'},'Configuração de Agentes'));
   el.appendChild(h('div',{className:'field'},[toggle('agent_offline'),h('div',{className:'toggle-desc'},'Detectar agentes que pararam de responder')]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Tempo para considerar offline'),slider('agent_timeout',1,60,1,5,' min')]));
-  document.getElementById('tog-agent_offline').checked=true;
-  document.getElementById('sld-agent_timeout').value=5;document.getElementById('sldv-agent_timeout').textContent='5 min';
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Intervalo de check do agente'),slider('agent_check_interval',10,600,10,60,' seg')]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Alerta de disco (%)'),slider('agent_disk_warn',50,99,1,80,'%')]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Projetos Docker monitorados'),h('select',{id:'sel-docker_projects',multiple:'',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:100px',onchange:'markDirty()'},[h('option',{value:'infra'},'infra'),h('option',{value:'infra-httpd'},'infra-httpd'),h('option',{value:'infra-mail'},'infra-mail'),h('option',{value:'dns-consolidated'},'dns-consolidated'),h('option',{value:'edge-sni'},'edge-sni'),h('option',{value:'r-observe'},'r-observe')])]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Contêineres ignorados'),h('select',{id:'sel-docker_ignore',multiple:'',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:100px',onchange:'markDirty()'},[h('option',{value:'results-mail-certs-bootstrap'},'results-mail-certs-bootstrap'),h('option',{value:'results-mail-certs'},'results-mail-certs'),h('option',{value:'portainer'},'portainer'),h('option',{value:'librenms'},'librenms')])]));
-  document.getElementById('sld-agent_check_interval').value=60;document.getElementById('sldv-agent_check_interval').textContent='60 seg';
-  document.getElementById('sld-agent_disk_warn').value=80;document.getElementById('sldv-agent_disk_warn').textContent='80%';
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sld-agent_timeout'},'Tempo para considerar offline'),slider('agent_timeout',1,60,1,s.offline_threshold_minutes??5,' min')]));
+  document.getElementById('tog-agent_offline').checked=s.offline_check_enabled??true;
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sld-agent_check_interval'},'Intervalo de check do agente'),slider('agent_check_interval',10,600,10,s.check_interval_seconds??60,' seg')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sld-agent_disk_warn'},'Alerta de disco (%)'),slider('agent_disk_warn',50,99,1,s.disk_warn_percent??80,'%')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sel-docker_projects'},'Projetos Docker monitorados'),h('select',{id:'sel-docker_projects',multiple:'',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:100px',onchange:'markDirty()'},[h('option',{value:'infra'},'infra'),h('option',{value:'infra-httpd'},'infra-httpd'),h('option',{value:'infra-mail'},'infra-mail'),h('option',{value:'dns-consolidated'},'dns-consolidated'),h('option',{value:'edge-sni'},'edge-sni'),h('option',{value:'r-observe'},'r-observe')])]));
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sel-docker_ignore'},'Contêineres ignorados'),h('select',{id:'sel-docker_ignore',multiple:'',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:100px',onchange:'markDirty()'},[h('option',{value:'results-mail-certs-bootstrap'},'results-mail-certs-bootstrap'),h('option',{value:'results-mail-certs'},'results-mail-certs'),h('option',{value:'portainer'},'portainer'),h('option',{value:'librenms'},'librenms')])]));
+  const projects=new Set(String(s.docker_projects||'').split(',').filter(Boolean));
+  const ignored=new Set(String(s.docker_ignore_containers||'').split(',').filter(Boolean));
+  [...document.getElementById('sel-docker_projects').options].forEach(o=>o.selected=projects.has(o.value));
+  [...document.getElementById('sel-docker_ignore').options].forEach(o=>o.selected=ignored.has(o.value));
 }
 // ── OS Tab ──
 function renderOS(el){
+  const s=_allSettings.os_defaults||{};
   el.innerHTML='';
   el.appendChild(h('div',{className:'panel-title'},'Monitoramento por Sistema Operacional'));
   el.appendChild(h('div',{className:'field'},[toggle('os_linux'),h('div',{className:'toggle-desc'},'Adicionar node_exporter automaticamente ao detectar Linux')]));
   el.appendChild(h('div',{className:'field'},[toggle('os_win'),h('div',{className:'toggle-desc'},'Adicionar windows_exporter ao detectar Windows')]));
   el.appendChild(h('div',{className:'field'},[toggle('os_snmp'),h('div',{className:'toggle-desc'},'Adicionar SNMP exporter ao detectar switches/roteadores')]));
-  document.getElementById('tog-os_linux').checked=true;
-  document.getElementById('tog-os_win').checked=true;
-  document.getElementById('tog-os_snmp').checked=true;
+  document.getElementById('tog-os_linux').checked=s.linux_node_exporter??true;
+  document.getElementById('tog-os_win').checked=s.windows_exporter??true;
+  document.getElementById('tog-os_snmp').checked=s.network_snmp??true;
 }
 // ── Monitoring Tab ──
 function renderMonitoring(el){
+  const s=_allSettings.monitoring||{};
   el.innerHTML='';
   el.appendChild(h('div',{className:'panel-title'},'Monitoramento'));
   el.appendChild(h('div',{className:'field'},[toggle('mon_icinga'),h('div',{className:'toggle-desc'},'Sincronizar hosts com Icinga2')]));
   el.appendChild(h('div',{className:'field'},[toggle('mon_prometheus'),h('div',{className:'toggle-desc'},'Gerar Prometheus Service Discovery (file_sd)')]));
-  document.getElementById('tog-mon_icinga').checked=true;
-  document.getElementById('tog-mon_prometheus').checked=true;
+  document.getElementById('tog-mon_icinga').checked=s.icinga_sync_enabled??true;
+  document.getElementById('tog-mon_prometheus').checked=s.prometheus_sd_enabled??true;
 }
 // ── Certs Tab ──
 function renderCerts(el){
+  const s=_allSettings.certs||{};
   el.innerHTML='';
   el.appendChild(h('div',{className:'panel-title'},'Verificação de Certificados TLS'));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Alertar quando expirar em (dias)'),slider('cert_warn',7,90,1,30,' dias')]));
-  el.appendChild(h('div',{className:'field'},[h('label',{},'Alerta crítico quando restarem (dias)'),slider('cert_crit',1,14,1,7,' dias')]));
-  document.getElementById('sld-cert_warn').value=30;document.getElementById('sldv-cert_warn').textContent='30 dias';
-  document.getElementById('sld-cert_crit').value=7;document.getElementById('sldv-cert_crit').textContent='7 dias';
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sld-cert_warn'},'Alertar quando expirar em (dias)'),slider('cert_warn',7,90,1,s.expiry_warning_days??30,' dias')]));
+  el.appendChild(h('div',{className:'field'},[h('label',{for:'sld-cert_crit'},'Alerta crítico quando restarem (dias)'),slider('cert_crit',1,14,1,s.expiry_critical_days??7,' dias')]));
 }
 
 // ── AI helpers ──
 
-function getHeaders(){return{'Content-Type':'application/json'};}
+function getHeaders(){
+  const csrf=document.cookie.split('; ').find(value=>value.split('=')[0].endsWith('_csrf'));
+  return {
+    'Content-Type':'application/json',
+    ...(csrf?{'X-CSRF-Token':decodeURIComponent(csrf.split('=').slice(1).join('='))}:{})
+  };
+}
 function selectAIProvider(p){_aiProvider=p;document.querySelectorAll('.provider-btn').forEach(b=>b.classList.toggle('active',b.dataset.provider===p));renderAI(document.getElementById('settings-panel'));markDirty();}
 function toggleKey(){const e=document.getElementById('api-key');e.type=e.type==='password'?'text':'password';}
 function loadModels(provider,currentModel){
@@ -2679,12 +2745,16 @@ async function saveAISettings(){
   const r=await fetch(API+'/ai/settings',{method:'POST',headers:getHeaders(),body:JSON.stringify(body)});
   const d=await r.json();
   showFeedback(d.ok?'IA configurada com sucesso':'Erro: '+(d.error||'desconhecido'),d.ok);
-  if(d.ok)loadAIStatus();
+  if(d.ok){_dirty=false;loadAIStatus();}
 }
 
 // ── Status ──
 function loadStatus(){
-  fetch(API+'/system/status',{headers:getHeaders()}).then(r=>r.json()).then(d=>{
+  fetch(API+'/system/status',{headers:getHeaders()}).then(async r=>{
+    if(r.status===401){location.href='/observe/login?next=/observe/settings';throw new Error('Sessão expirada');}
+    if(!r.ok)throw new Error('Status indisponível ('+r.status+')');
+    return r.json();
+  }).then(d=>{
     const ai=d.ai||{};const ag=d.agents||{};const disc=d.discovery||{};const s=d.settings||{};
     document.getElementById('st-ai').textContent=s.ai?.provider||'—';
     document.getElementById('st-agents').textContent=(ag.online||0)+'/'+(ag.total||0);
@@ -2698,27 +2768,25 @@ function loadStatus(){
     document.getElementById('sd-ports').className='dot '+(s.discovery?.port_change_detection?'ok':'warn');
     document.getElementById('sv-certs').textContent='warning '+s.certs?.expiry_warning_days+'d, crit '+s.certs?.expiry_critical_days+'d';
     _allSettings=s;
-  }).catch(e=>console.error('Status error:',e));
+    if(!_settingsReady){
+      _settingsReady=true;
+      document.querySelectorAll('.tab-btn').forEach(button=>button.disabled=false);
+      switchTab(_activeSettingsTab||'discovery');
+    }
+  }).catch(e=>{
+    if(e.message==='Sessão expirada')return;
+    showFeedback('Não foi possível carregar a configuração real: '+e.message,false);
+  });
 }
 
 function logout(){fetch(API+'/auth/logout',{method:'POST',headers:getHeaders()}).finally(()=>location.href='/observe/login');}
 
 // Init
-switchTab('discovery');
+_activeSettingsTab='discovery';
+document.querySelectorAll('.tab-btn').forEach(button=>button.disabled=true);
+document.getElementById('settings-panel').innerHTML='<div class="loading-state" role="status">Carregando configuração real…</div>';
 loadStatus();
 setInterval(loadStatus,30000);
 </script>
 </body>
 </html>`;
-
-
-// ─── Rota da página de configuração ────────────────────────────────────────
-app.get('/observe/settings', requireAuth, (_req, res) => {
-  res.set('Content-Type', 'text/html; charset=utf-8');
-  res.end(SETTINGS_HTML);
-});
-
-app.get('/observe/config', requireAuth, (_req, res) => {
-  res.set('Content-Type', 'text/html; charset=utf-8');
-  res.end(SETTINGS_HTML);
-});

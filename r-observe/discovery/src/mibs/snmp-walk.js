@@ -13,11 +13,12 @@
  * Requer: net-snmp-utils (snmpwalk, snmpbulkwalk, snmpget)
  */
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { log } = require('../utils/logger');
+const { isValidHost } = require('../validators');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_COMMUNITY = process.env.SNMP_COMMUNITY || 'public';
 const DEFAULT_TIMEOUT = parseInt(process.env.SNMP_TIMEOUT_MS || '15000', 10);
@@ -44,15 +45,19 @@ async function snmpWalk(host, oid, opts = {}) {
   const community = opts.community || DEFAULT_COMMUNITY;
   const timeout = (opts.timeout || DEFAULT_TIMEOUT) / 1000; // snmpwalk usa segundos
   const version = opts.version || DEFAULT_VERSION;
-  const retries = opts.retries || MAX_RETRIES;
+  const retries = Math.max(0, Math.min(5, Number(opts.retries ?? MAX_RETRIES) || 0));
+  if (!isValidHost(host) || !isValidOid(oid)) return [];
 
   // Prefere snmpbulkwalk para v2c (muito mais rápido)
-  const cmd = (version === '2c' && !opts.noBulk)
-    ? `snmpbulkwalk -v2c -c ${escapeShell(community)} -Cr50 -t ${timeout} -r ${retries} ${escapeShell(host)} ${oid}`
-    : `snmpwalk -v${version} -c ${escapeShell(community)} -t ${timeout} -r ${retries} ${escapeShell(host)} ${oid}`;
+  const bulk = version === '2c' && !opts.noBulk;
+  const file = bulk ? 'snmpbulkwalk' : 'snmpwalk';
+  const safeVersion = ['1', '2c'].includes(version) ? version : DEFAULT_VERSION;
+  const args = [`-v${safeVersion}`, '-c', String(community)];
+  if (bulk) args.push('-Cr50');
+  args.push('-t', String(timeout), '-r', String(retries), host, oid);
 
   try {
-    const { stdout } = await execAsync(cmd, {
+    const { stdout } = await execFileAsync(file, args, {
       timeout: (timeout * 1000) + 10000,
       maxBuffer: 10 * 1024 * 1024, // 10MB
     });
@@ -77,14 +82,19 @@ async function snmpGet(host, oids, opts = {}) {
   const community = opts.community || DEFAULT_COMMUNITY;
   const timeout = (opts.timeout || DEFAULT_TIMEOUT) / 1000;
   const version = opts.version || DEFAULT_VERSION;
-  const retries = opts.retries || MAX_RETRIES;
+  const retries = Math.max(0, Math.min(5, Number(opts.retries ?? MAX_RETRIES) || 0));
 
   const oidList = Array.isArray(oids) ? oids : [oids];
-  const oidStr = oidList.filter(Boolean).map(escapeShell).join(' ');
+  const validOids = oidList.filter(isValidOid);
+  if (!isValidHost(host) || validOids.length !== oidList.length) {
+    return Array.isArray(oids) ? oids.map(() => null) : null;
+  }
+  const safeVersion = ['1', '2c'].includes(version) ? version : DEFAULT_VERSION;
 
   try {
-    const { stdout } = await execAsync(
-      `snmpget -v${version} -c ${escapeShell(community)} -t ${timeout} -r ${retries} -Oqv ${escapeShell(host)} ${oidStr}`,
+    const { stdout } = await execFileAsync(
+      'snmpget', [`-v${safeVersion}`, '-c', String(community), '-t', String(timeout),
+        '-r', String(retries), '-Oqv', host, ...validOids],
       { timeout: (timeout * 1000) + 10000 }
     );
 
@@ -162,6 +172,11 @@ function escapeShell(str) {
   return `'${String(str).replace(/'/g, `'"'"'`)}'`;
 }
 
+function isValidOid(value) {
+  return typeof value === 'string' && value.length <= 256 &&
+    /^(?:\.?\d+(?:\.\d+)*|[A-Za-z][A-Za-z0-9-]*::[A-Za-z0-9-]+(?:\.\d+)*)$/.test(value);
+}
+
 module.exports = {
   snmpWalk,
   snmpGet,
@@ -171,4 +186,5 @@ module.exports = {
   parseWalkLine,
   cleanSnmpValue,
   escapeShell,
+  isValidOid,
 };

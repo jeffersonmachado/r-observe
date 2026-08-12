@@ -1,0 +1,282 @@
+{
+    "title": "R-Observe Health",
+    "uid": "r-observe-health",
+    "tags": ["r-observe", "internal", "health"],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "API Request Rate",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "rate(r_observe_api_http_requests_total[5m])",
+            "legendFormat": "{{method}} {{route}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "API Error Rate",
+        "type": "graph",
+        "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "rate(r_observe_api_http_requests_total{status=~\"5..|4..\"}[5m])",
+            "legendFormat": "{{status}} {{route}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "API Latency (p95)",
+        "type": "graph",
+        "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service=\"r-observe-api\"}[5m]))",
+            "legendFormat": "p95"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      },
+      {
+        "id": 10,
+        "title": "Discovery Runs",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 6, "w": 4, "h": 4 },
+        "targets": [
+          { "expr": "r_observe_discovery_runs_total" }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Events Processed",
+        "type": "stat",
+        "gridPos": { "x": 4, "y": 6, "w": 4, "h": 4 },
+        "targets": [
+          { "expr": "r_observe_events_received_total" }
+        ]
+      },
+      {
+        "id": 12,
+        "title": "AI Analyses",
+        "type": "stat",
+        "gridPos": { "x": 8, "y": 6, "w": 4, "h": 4 },
+        "targets": [
+          { "expr": "r_observe_ai_analyses_total" }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "Active Incidents",
+        "type": "stat",
+        "gridPos": { "x": 12, "y": 6, "w": 4, "h": 4 },
+        "targets": [
+          {
+            "expr": "sum(r_observe_active_incidents)",
+            "format": "table"
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "title": "Worker Queue Depth",
+        "type": "stat",
+        "gridPos": { "x": 16, "y": 6, "w": 4, "h": 4 },
+        "targets": [
+          { "expr": "r_observe_queue_depth" }
+        ]
+      },
+      {
+        "id": 15,
+        "title": "Active Sessions",
+        "type": "stat",
+        "gridPos": { "x": 20, "y": 6, "w": 4, "h": 4 },
+        "targets": [
+          { "expr": "r_observe_active_sessions" }
+        ]
+      },
+      {
+        "id": 20,
+        "title": "PostgreSQL — Connections",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 10, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "expr": "pg_stat_database_numbackends{datname=\"observedb\"}",
+            "legendFormat": "Active connections"
+          }
+        ]
+      },
+      {
+        "id": 21,
+        "title": "PostgreSQL — Query Performance",
+        "type": "graph",
+        "gridPos": { "x": 12, "y": 10, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "expr": "rate(pg_stat_database_xact_commit{datname=\"observedb\"}[5m])",
+            "legendFormat": "Commits/s"
+          },
+          {
+            "expr": "rate(pg_stat_database_xact_rollback{datname=\"observedb\"}[5m])",
+            "legendFormat": "Rollbacks/s"
+          }
+        ]
+      },
+      {
+        "id": 30,
+        "title": "Redis — Memory Usage",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 16, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "redis_memory_used_bytes",
+            "legendFormat": "Used"
+          },
+          {
+            "expr": "redis_memory_max_bytes",
+            "legendFormat": "Max"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          }
+        }
+      },
+      {
+        "id": 31,
+        "title": "Redis — Connected Clients",
+        "type": "graph",
+        "gridPos": { "x": 8, "y": 16, "w": 8, "h": 6 },
+        "targets": [
+          { "expr": "redis_connected_clients" }
+        ]
+      },
+      {
+        "id": 32,
+        "title": "Redis — Hit Rate",
+        "type": "graph",
+        "gridPos": { "x": 16, "y": 16, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m]))",
+            "legendFormat": "Hit rate"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "max": 1,
+            "min": 0
+          }
+        }
+      },
+      {
+        "id": 40,
+        "title": "Container CPU Usage",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 22, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "expr": "rate(container_cpu_usage_seconds_total{name=~\"r-observe.*\"}[5m])",
+            "legendFormat": "{{name}}"
+          }
+        ]
+      },
+      {
+        "id": 41,
+        "title": "Container Memory Usage",
+        "type": "graph",
+        "gridPos": { "x": 12, "y": 22, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "expr": "container_memory_usage_bytes{name=~\"r-observe.*\"}",
+            "legendFormat": "{{name}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          }
+        }
+      },
+      {
+        "id": 50,
+        "title": "Node Exporter — Host CPU",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 28, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "CPU"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "max": 100,
+            "min": 0
+          }
+        }
+      },
+      {
+        "id": 51,
+        "title": "Node Exporter — Host Memory",
+        "type": "graph",
+        "gridPos": { "x": 8, "y": 28, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100",
+            "legendFormat": "Memory %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "max": 100,
+            "min": 0
+          }
+        }
+      },
+      {
+        "id": 52,
+        "title": "Node Exporter — Host Disk",
+        "type": "graph",
+        "gridPos": { "x": 16, "y": 28, "w": 8, "h": 6 },
+        "targets": [
+          {
+            "expr": "(node_filesystem_size_bytes - node_filesystem_avail_bytes) / node_filesystem_size_bytes * 100",
+            "legendFormat": "{{mountpoint}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "max": 100,
+            "min": 0
+          }
+        }
+      }
+    ]
+}

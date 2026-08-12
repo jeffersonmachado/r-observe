@@ -34,17 +34,23 @@ const ROUTE_ACTIONS = {
 
   // Passive
   'POST /api/discovery/passive/events':   { action: 'passive.ingest', resource: 'finding' },
+
+  // Administrative operations
+  'POST /api/discovery/snmp/deep/:host':  { action: 'snmp.deep.scan', resource: 'host' },
+  'POST /api/discovery/ipam/subnets':     { action: 'ipam.subnet.create', resource: 'subnet' },
+  'POST /api/discovery/alerts/:id/acknowledge': { action: 'alert.acknowledge', resource: 'alert' },
+  'POST /api/discovery/config-backup/:host': { action: 'config.backup', resource: 'host' },
 };
 
 function matchRoute(method, path) {
   const normalized = `${method.toUpperCase()} ${path}`;
   if (ROUTE_ACTIONS[normalized]) return ROUTE_ACTIONS[normalized];
 
-  // Pattern matching para rotas com :id
+  // Pattern matching para segmentos parametrizados.
   for (const [pattern, def] of Object.entries(ROUTE_ACTIONS)) {
     const [pmethod, ppath] = pattern.split(' ');
     if (pmethod !== method.toUpperCase()) continue;
-    const regex = new RegExp('^' + ppath.replace(/:id/g, '[^/]+') + '$');
+    const regex = new RegExp('^' + ppath.replace(/:[a-zA-Z_][a-zA-Z0-9_]*/g, '[^/]+') + '$');
     if (regex.test(path)) return def;
   }
   return null;
@@ -66,6 +72,7 @@ function buildSummary(def, req) {
   if (req.body?.lifecycle_state) parts.push(`→${req.body.lifecycle_state}`);
   if (req.body?.profile) parts.push(`profile=${req.body.profile}`);
   if (req.params?.id) parts.push(`id=${req.params.id}`);
+  if (req.params?.host) parts.push(`host=${req.params.host}`);
   return `${def.action}${parts.length ? ' ' + parts.join(' ') : ''}`;
 }
 
@@ -74,8 +81,6 @@ function buildSummary(def, req) {
  */
 function audit(req, _res, next) {
   req._auditMeta = {
-    actor: req.auth?.user || 'anonymous',
-    actor_role: req.auth?.role || 'unknown',
     actor_ip: extractActorIp(req),
   };
   next();
@@ -102,12 +107,12 @@ async function logAudit(db, req, extra = {}) {
 
   const meta = req._auditMeta || {};
   const scope = {
-    tenant_id: req.query?.tenant_id || req.body?.tenant_id || 'default',
+    tenant_id: req.auth?.tenantId || req.query?.tenant_id || req.body?.tenant_id || 'default',
     site_id: req.query?.site_id || req.body?.site_id || 'default-site',
     edge_id: req.query?.edge_id || req.body?.edge_id || 'central',
   };
 
-  const resourceId = req.params?.id || extra.resource_id || null;
+  const resourceId = req.params?.id || req.params?.host || extra.resource_id || null;
   const resourceKey = req.body?.address || req.body?.asset_key || extra.resource_key || null;
 
   try {
@@ -119,8 +124,8 @@ async function logAudit(db, req, extra = {}) {
         String(scope.tenant_id),
         String(scope.site_id),
         String(scope.edge_id),
-        meta.actor,
-        meta.actor_role,
+        req.auth?.user || req.auth?.service || 'unknown',
+        req.auth?.role || 'unknown',
         meta.actor_ip,
         def.action,
         def.resource,

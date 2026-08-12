@@ -29,6 +29,7 @@ Thumbs.db
 coverage/
 .nyc_output/
 tests/playwright-report/
+test-results/
 
 # Dados sensíveis
 *.pem

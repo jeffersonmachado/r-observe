@@ -504,6 +504,74 @@ paths:
         '200':
           description: Target groups para Prometheus
 
+  # ─── Remote agents ──────────────────────────────────────────────────────────
+  /api/discovery/agents:
+    get:
+      tags: [Agents]
+      summary: Lista agentes do escopo autenticado
+      security: [{ internalToken: [] }]
+      responses:
+        '200': { description: Lista de agentes e estado online/offline }
+
+  /api/discovery/agents/register:
+    post:
+      tags: [Agents]
+      summary: Registra ou atualiza um agente remoto
+      security: [{ internalToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, hostname]
+              properties:
+                agent_id: { type: string, maxLength: 128 }
+                hostname: { type: string }
+                subnets: { type: array, items: { type: string } }
+                capabilities: { type: array, items: { type: string } }
+                version: { type: string }
+      responses:
+        '201': { description: Agente registrado }
+        '400': { description: Identidade inválida }
+
+  /api/discovery/agents/heartbeat:
+    post:
+      tags: [Agents]
+      summary: Atualiza a presença de um agente
+      security: [{ internalToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id]
+              properties:
+                agent_id: { type: string }
+      responses:
+        '200': { description: Heartbeat aceito }
+
+  /api/discovery/agents/report:
+    post:
+      tags: [Agents]
+      summary: Recebe assets e findings coletados por agente remoto
+      security: [{ internalToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, assets, findings]
+              properties:
+                agent_id: { type: string }
+                assets: { type: array, maxItems: 1000, items: { type: object } }
+                findings: { type: array, maxItems: 5000, items: { type: object } }
+      responses:
+        '200': { description: Report processado }
+        '400': { description: Report inválido ou acima do limite }
+
 components:
   securitySchemes:
     internalToken:

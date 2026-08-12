@@ -9,16 +9,24 @@
 // 2. In-cluster mode - usa service account token + CA do pod
 // 3. API mode - conexao direta a API server via URL + token
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { log } = require('../utils/logger');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const K8S_MODE = process.env.DISCOVERY_K8S_MODE || 'kubectl';   // kubectl | in-cluster | api
 const K8S_API_URL = process.env.DISCOVERY_K8S_API_URL || '';     // https://k8s-api:6443
 const K8S_TOKEN = process.env.DISCOVERY_K8S_TOKEN || '';         // Bearer token
 const K8S_NAMESPACE = process.env.DISCOVERY_K8S_NAMESPACE || ''; // '' = all namespaces
+
+function namespaceArgs() {
+  return K8S_NAMESPACE ? ['-n', K8S_NAMESPACE] : ['--all-namespaces'];
+}
+
+async function kubectl(args, timeout) {
+  return execFileAsync('kubectl', args, { timeout, maxBuffer: 16 * 1024 * 1024 });
+}
 
 // Descobre via kubectl (modo default).
 async function discoverViaKubectl() {
@@ -31,10 +39,8 @@ async function discoverViaKubectl() {
   };
 
   try {
-    const nsFlag = K8S_NAMESPACE ? `-n ${K8S_NAMESPACE}` : '--all-namespaces';
-
     // Namespaces
-    const { stdout: nsOut } = await execAsync('kubectl get namespaces -o json', { timeout: 10000 });
+    const { stdout: nsOut } = await kubectl(['get', 'namespaces', '-o', 'json'], 10000);
     const nsData = JSON.parse(nsOut);
     for (const ns of (nsData.items || [])) {
       resources.namespaces.push({
@@ -46,7 +52,7 @@ async function discoverViaKubectl() {
     }
 
     // Nodes
-    const { stdout: nodeOut } = await execAsync('kubectl get nodes -o json', { timeout: 10000 });
+    const { stdout: nodeOut } = await kubectl(['get', 'nodes', '-o', 'json'], 10000);
     const nodeData = JSON.parse(nodeOut);
     for (const node of (nodeData.items || [])) {
       const addresses = (node.status?.addresses || []).map(a => ({ type: a.type, address: a.address }));
@@ -64,7 +70,7 @@ async function discoverViaKubectl() {
     }
 
     // Pods
-    const { stdout: podOut } = await execAsync(`kubectl get pods ${nsFlag} -o json`, { timeout: 15000 });
+    const { stdout: podOut } = await kubectl(['get', 'pods', ...namespaceArgs(), '-o', 'json'], 15000);
     const podData = JSON.parse(podOut);
     for (const pod of (podData.items || [])) {
       const containers = (pod.spec?.containers || []).map(c => ({
@@ -87,7 +93,7 @@ async function discoverViaKubectl() {
     }
 
     // Services
-    const { stdout: svcOut } = await execAsync(`kubectl get services ${nsFlag} -o json`, { timeout: 10000 });
+    const { stdout: svcOut } = await kubectl(['get', 'services', ...namespaceArgs(), '-o', 'json'], 10000);
     const svcData = JSON.parse(svcOut);
     for (const svc of (svcData.items || [])) {
       resources.services.push({
@@ -109,7 +115,7 @@ async function discoverViaKubectl() {
     }
 
     // Deployments
-    const { stdout: deployOut } = await execAsync(`kubectl get deployments ${nsFlag} -o json`, { timeout: 10000 });
+    const { stdout: deployOut } = await kubectl(['get', 'deployments', ...namespaceArgs(), '-o', 'json'], 10000);
     const deployData = JSON.parse(deployOut);
     for (const deploy of (deployData.items || [])) {
       resources.deployments.push({
@@ -226,7 +232,7 @@ async function discoverKubernetes() {
 // Testa se kubectl esta disponivel.
 async function isKubectlAvailable() {
   try {
-    await execAsync('kubectl version --client --short 2>/dev/null || kubectl version --client', { timeout: 5000 });
+    await kubectl(['version', '--client'], 5000);
     return true;
   } catch {
     return false;

@@ -127,11 +127,14 @@ async function createRun(db, ctx) {
   return r.rows[0];
 }
 
-async function completeRun(db, runId, status, summary) {
-  await db.query(
-    `UPDATE observe_discovery_runs SET status = $2, completed_at = NOW(), summary = $3, updated_at = NOW() WHERE id = $1`,
-    [runId, status, JSON.stringify(summary || {})]
+async function completeRun(db, runId, ctx, status, summary) {
+  const result = await db.query(
+    `UPDATE observe_discovery_runs
+     SET status = $2, completed_at = NOW(), summary = $3, updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $4 AND site_id = $5 AND edge_id = $6`,
+    [runId, status, JSON.stringify(summary || {}), ctx.tenant_id, ctx.site_id, ctx.edge_id]
   );
+  if (!result.rowCount) throw new Error(`Discovery run not found in scope: ${runId}`);
 }
 
 async function upsertAsset(db, row) {
@@ -175,9 +178,9 @@ async function upsertAsset(db, row) {
              metadata = $13,
              last_seen_at = NOW(),
              updated_at = NOW()
-         WHERE id = $1
+         WHERE id = $1 AND tenant_id = $14 AND site_id = $15 AND edge_id = $16
          RETURNING *`,
-        [existing.row.id, ...values]
+        [existing.row.id, ...values, row.tenant_id, row.site_id, row.edge_id]
       )
     : await db.query(
         `INSERT INTO observe_assets

@@ -42,6 +42,10 @@ body { background: var(--bg); color: var(--text); font: 14px/1.5 'Segoe UI', san
   transition: color .15s;
 }
 .topbar-link:hover { color: var(--text); }
+:where(a, button, input, select):focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
 .header-controls {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -226,3 +230,14 @@ select.token-field { max-width: 200px; }
 }
 #toast.ok  { border-color: var(--green); color: var(--green); }
 #toast.err { border-color: var(--red);   color: var(--red); }
+
+@media (max-width: 760px) {
+  .topbar, .header-controls { padding-inline: 12px; flex-wrap: wrap; }
+  nav { max-width: 100%; padding-inline: 0; overflow-x: auto; }
+  .tab { flex: 0 0 auto; padding-inline: .8rem; }
+  .page { min-width: 0; padding: 12px; }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+  .table-wrap { max-width: 100%; }
+  #contacts > div[style*="display:grid"] { grid-template-columns: 1fr !important; }
+  #toast { left: 12px; right: 12px; bottom: 12px; }
+}

@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -17,12 +18,24 @@ const { buildTopologyEdges } = require('./topology/engine');
 const { fingerprintAsset } = require('./fingerprint/engine');
 const { toPromSdGroups } = require('./exporters/prometheus-sd');
 const { emitEvent } = require('./queues/events');
+const { createQueueJob, parseQueueJob, createReliableListConsumer, queueStats } = require('./queues/reliable-list');
+const { acquireScanAdmission, releaseScanAdmission, admissionFromJob } = require('./queues/scan-admission');
 const { upsertAsset } = require('./engine/repository');
 const { createDbClient } = require('./db');
-const { requireJwt, signInternalToken, verifyInternalToken } = require('./jwt');
+const { requireJwt, requireScope } = require('@results/auth');
+const { resolveTenantId, parseScope } = require('./auth/tenant-scope');
+const { runWithTenant } = require('./shared/tenant-context');
+const { createHttpErrorHandler } = require('./shared/http-error-handler');
 
-const { createLifecycle } = require('../shared/lifecycle');
+const { createLifecycle } = require('./shared/lifecycle');
 const { audit, logAudit } = require('./audit');
+const { isValidHost, isValidPort } = require('./validators');
+const { requireQuota } = require('./quotas');
+const { startScheduler } = require('./schedulers/scan-scheduler');
+const { startRetention } = require('./retention');
+const { startRunRecovery } = require('./run-recovery');
+const { calcNextRun } = require('./schedulers/scan-scheduler');
+const { handleAgentRegister, handleAgentHeartbeat, handleAgentReport } = require('./scanners/agents');
 
 const PORT = parseInt(process.env.PORT || '3010', 10);
 const SCAN_QUEUE_ENABLED = process.env.DISCOVERY_SCAN_QUEUE_ENABLED !== 'false';
@@ -32,9 +45,14 @@ const PASSIVE_LISTENERS_ENABLED = process.env.DISCOVERY_PASSIVE_LISTENERS_ENABLE
 // ── Progresso em memória da varredura atual ────────────────────────────────
 const PIPELINE_STAGES = ['policy', 'run_create', 'targets', 'scanning', 'docker', 'topology', 'prometheus_sd', 'icinga', 'done'];
 
-let _progress = null;
+const _progressByScope = new Map();
 
-function makeOnProgress() {
+function progressKey(scope = {}) {
+  return `${scope.tenant_id || 'default'}:${scope.site_id || 'default-site'}:${scope.edge_id || 'central'}`;
+}
+
+function makeOnProgress(scope = {}) {
+  const key = progressKey(scope);
   const startedAt = new Date().toISOString();
   const state = {
     active: true,
@@ -49,7 +67,7 @@ function makeOnProgress() {
     topology_edges: 0,
     summary: null,
   };
-  _progress = state;
+  _progressByScope.set(key, state);
   return (update) => {
     if (update.run_id) state.run_id = update.run_id;
     if (update.stage) state.stage = update.stage;
@@ -61,7 +79,11 @@ function makeOnProgress() {
     if (update.topology_edges != null) state.topology_edges = update.topology_edges;
     if (update.summary) state.summary = update.summary;
     if (update.stage === 'done' && update.status === 'done') state.active = false;
-    _progress = { ...state };
+    _progressByScope.set(key, { ...state });
+    if (redis && state.run_id) {
+      redis.set(`observe:discovery:progress:${state.run_id}`, JSON.stringify({ ...state, scope }), 'EX', 86400)
+        .catch((e) => log('warn', 'Progress persistence failed', { err: e.message, run_id: state.run_id }));
+    }
   };
 }
 
@@ -69,12 +91,28 @@ const db = createDbClient(process.env);
 
 const redis = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 }) : null;
 if (redis) redis.connect().catch((e) => log('warn', 'Redis connect failed', { err: e.message }));
+const queueRedis = redis ? redis.duplicate({ lazyConnect: true, maxRetriesPerRequest: null }) : null;
+if (queueRedis) queueRedis.connect().catch((e) => log('warn', 'Redis queue connect failed', { err: e.message }));
+const reliableQueueConsumer = queueRedis ? createReliableListConsumer(queueRedis) : null;
 
 const register = new client.Registry();
 client.collectDefaultMetrics({ register });
+const discoveryMetrics = require('./metrics');
+for (const collector of Object.values(discoveryMetrics)) register.registerMetric(collector);
 const runsTotal = new client.Counter({ name: 'r_observe_discovery_runs_total', help: 'Total discovery runs', labelNames: ['status'], registers: [register] });
 
 const app = express();
+app.locals.db = db;
+
+const reactDir = path.dirname(require.resolve('react/package.json'));
+const reactDomDir = path.dirname(require.resolve('react-dom/package.json'));
+const d3Dir = path.resolve(path.dirname(require.resolve('d3')), '..', 'dist');
+app.get('/observe/discovery/data/vendor/react.min.js', (_req, res) =>
+  res.sendFile(path.join(reactDir, 'umd/react.production.min.js')));
+app.get('/observe/discovery/data/vendor/react-dom.min.js', (_req, res) =>
+  res.sendFile(path.join(reactDomDir, 'umd/react-dom.production.min.js')));
+app.get('/observe/discovery/data/vendor/d3.min.js', (_req, res) =>
+  res.sendFile(path.join(d3Dir, 'd3.min.js')));
 
 let _vite = null;
 if (process.env.NODE_ENV === 'development') {
@@ -90,38 +128,21 @@ app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 120 }));
 
 const requireAuth = (req, res, next) => {
-  const provided = req.headers['x-internal-token'] ||
-    (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (provided) {
-    const payload = verifyInternalToken(provided);
-    if (payload) {
-      req.auth = { type: 'jwt', user: payload.sub || 'internal', role: payload.role || 'admin' };
-      return next();
-    }
-  }
-  return res.status(401).json({ error: 'Unauthorized' });
+  return requireJwt(req, res, () => {
+    const requestedTenant = req.body?.tenant_id ?? req.query?.tenant_id;
+    const tenantId = resolveTenantId(req.auth, requestedTenant);
+    if (req.body && typeof req.body === 'object') req.body.tenant_id = tenantId;
+    if (req.query && typeof req.query === 'object') req.query.tenant_id = tenantId;
+    return runWithTenant(tenantId, next);
+  });
 };
 
-const requireAuthOpt = (req, _res, next) => {
-  const provided = req.headers['x-internal-token'] ||
-    (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (provided) {
-    const payload = verifyInternalToken(provided);
-    if (payload) req.auth = { type: 'jwt', user: payload.sub || 'internal', role: payload.role || 'admin' };
-  }
-  next();
-};
+const requireAuthOpt = requireAuth; // requireAuthOpt agora exige autenticação (security hardening)
+const requireWrite = requireScope('discovery:write');
+const requestScope = (req, input = {}) => parseScope(input || {}, req.auth || {});
 
 // ── Audit middleware global: extrai actor/ip ──────────────────────────────
 app.use(audit);
-
-function parseScope(input = {}) {
-  return {
-    tenant_id: String(input.tenant_id || 'default'),
-    site_id: String(input.site_id || 'default-site'),
-    edge_id: String(input.edge_id || 'central'),
-  };
-}
 
 function validateScanInput(body = {}) {
   const validProfiles = ['safe', 'balanced', 'aggressive'];
@@ -141,16 +162,63 @@ function asyncRoute(fn) {
 // ── Passive event ingestion (extraído para passive/ingest.js) ──────────────
 const { ingestPassiveEvents } = createPassiveIngest({ db, redis, log, parseScope });
 
+function validAgentId(value) {
+  return /^[a-zA-Z0-9_.:-]{1,128}$/.test(String(value || ''));
+}
+
+function executableAvailable(name) {
+  return String(process.env.PATH || '').split(path.delimiter).some((dir) => {
+    try { fs.accessSync(path.join(dir, name), fs.constants.X_OK); return true; } catch { return false; }
+  });
+}
+
+async function discoveryHealth() {
+  let database = true;
+  try { await db.query('SELECT 1'); } catch { database = false; }
+  let redisOk = !redis;
+  let scanQueue = { enabled: SCAN_QUEUE_ENABLED, pending: 0, processing: 0, dead_letter: 0, consumers: 0 };
+  if (redis) {
+    try {
+      redisOk = await Promise.race([
+        redis.ping().then((v) => v === 'PONG'),
+        new Promise((resolve) => setTimeout(() => resolve(false), 1000)),
+      ]);
+    } catch { redisOk = false; }
+    if (redisOk) {
+      try {
+        scanQueue = { enabled: SCAN_QUEUE_ENABLED, ...await queueStats(redis) };
+        discoveryMetrics.queueDepth.set(scanQueue.pending);
+        discoveryMetrics.queueProcessing.set(scanQueue.processing);
+        discoveryMetrics.queueDeadLetter.set(scanQueue.dead_letter);
+        discoveryMetrics.queueConsumers.set(scanQueue.consumers);
+      } catch (_) {}
+    }
+  }
+  const capabilities = {
+    nmap: executableAvailable('nmap'),
+    snmp: executableAvailable('snmpwalk') && executableAvailable('snmpget'),
+    arp_scan: executableAvailable('arp-scan'),
+    ping: executableAvailable('ping'),
+    ssh_backup: executableAvailable('ssh') && executableAvailable('sshpass'),
+    lldp: executableAvailable('lldpcli'),
+    kubernetes: executableAvailable('kubectl'),
+    bluetooth: executableAvailable('bluetoothctl'),
+  };
+  const requiredOk = database && (!SCAN_QUEUE_ENABLED || redisOk);
+  return { httpStatus: requiredOk ? 200 : 503, body: {
+    status: requiredOk ? 'ok' : 'degraded', service: 'r-observe-discovery', version: '0.1.0',
+    dependencies: { database, redis: redisOk }, queue: scanQueue, capabilities,
+  } };
+}
+
 app.get('/health', async (_req, res) => {
-  let dbOk = true;
-  try { await db.query('SELECT 1'); } catch { dbOk = false; }
-  res.status(dbOk ? 200 : 503).json({ status: dbOk ? 'ok' : 'degraded', service: 'r-observe-discovery', version: '0.1.0' });
+  const health = await discoveryHealth();
+  res.status(health.httpStatus).json(health.body);
 });
 
 app.get('/api/discovery/health', async (_req, res) => {
-  let dbOk = true;
-  try { await db.query('SELECT 1'); } catch { dbOk = false; }
-  res.status(dbOk ? 200 : 503).json({ status: dbOk ? 'ok' : 'degraded', service: 'r-observe-discovery', version: '0.1.0' });
+  const health = await discoveryHealth();
+  res.status(health.httpStatus).json(health.body);
 });
 
 app.get('/metrics', async (_req, res) => {
@@ -158,35 +226,63 @@ app.get('/metrics', async (_req, res) => {
   res.end(await register.metrics());
 });
 
-app.get('/api/discovery/progress', requireAuthOpt, (_req, res) => {
-  if (!_progress) return res.json({ active: false });
-  const elapsed_ms = Date.now() - new Date(_progress.started_at).getTime();
-  res.json({ ..._progress, elapsed_ms });
-});
+app.get('/api/discovery/progress', requireAuthOpt, asyncRoute(async (req, res) => {
+  if (req.query.run_id && redis) {
+    const raw = await redis.get(`observe:discovery:progress:${req.query.run_id}`);
+    if (raw) {
+      const persisted = JSON.parse(raw);
+      const scope = requestScope(req, req.query);
+      if (progressKey(persisted.scope) !== progressKey(scope)) return res.status(404).json({ error: 'not_found' });
+      const elapsed_ms = Date.now() - new Date(persisted.started_at).getTime();
+      return res.json({ ...persisted, elapsed_ms, persisted: true });
+    }
+  }
+  const progress = _progressByScope.get(progressKey(requestScope(req, req.query)));
+  if (!progress) return res.json({ active: false });
+  const elapsed_ms = Date.now() - new Date(progress.started_at).getTime();
+  res.json({ ...progress, elapsed_ms });
+}));
 
-app.post('/api/discovery/scan', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/scan', requireAuth, requireWrite, requireQuota('scans'), asyncRoute(async (req, res) => {
   const err = validateScanInput(req.body || {});
   if (err) return res.status(400).json({ error: err });
-  const payload = { ...(req.body || {}), docker_discovery_enabled: DOCKER_DISCOVERY_ENABLED };
+  let payload = createQueueJob({ ...(req.body || {}), docker_discovery_enabled: DOCKER_DISCOVERY_ENABLED });
+  const scanScope = requestScope(req, payload);
+  const admission = redis
+    ? await acquireScanAdmission(redis, scanScope, req._quota?.max_concurrent_scans || 1)
+    : null;
+  if (redis && !admission) {
+    return res.status(429).json({ error: 'Quota exceeded', resource: 'concurrent_scans', max: req._quota?.max_concurrent_scans || 1 });
+  }
+  if (admission) payload = { ...payload, queue_admission_key: admission.key, queue_admission_token: admission.token };
 
   if (SCAN_QUEUE_ENABLED && redis) {
-    await redis.rpush('observe:scan:network', JSON.stringify(payload));
-    await redis.publish('observe:scan:network', JSON.stringify({ event: 'scan_enqueued', ts: new Date().toISOString() }));
-    _progress = { active: true, queued: true, started_at: new Date().toISOString(), stage: 'queued',
+    try {
+      await redis.rpush('observe:scan:network', JSON.stringify(payload));
+      await redis.publish('observe:scan:network', JSON.stringify({ event: 'scan_enqueued', ts: new Date().toISOString() }));
+    } catch (error) {
+      await releaseScanAdmission(redis, admission).catch(() => {});
+      throw error;
+    }
+    _progressByScope.set(progressKey(scanScope), { active: true, queued: true, started_at: new Date().toISOString(), stage: 'queued',
       stages: Object.fromEntries(PIPELINE_STAGES.map((s) => [s, 'pending'])),
-      scanned: 0, total_targets: 0, discovered: 0 };
-    return res.status(202).json({ queued: true, queue: 'observe:scan:network' });
+      scanned: 0, total_targets: 0, discovered: 0 });
+    return res.status(202).json({ queued: true, queue: 'observe:scan:network', queue_job_id: payload.queue_job_id });
   }
 
-  const onProgress = makeOnProgress();
-  const out = await runDiscovery({ db, redis, input: payload, onProgress });
-  runsTotal.inc({ status: 'completed' });
-  await logAudit(db, req, { resource_id: out.run_id, summary_suffix: out.summary ? ` | assets=${out.summary.discovered_assets} edges=${out.summary.topology_edges}` : '' });
-  res.status(202).json({ ...out, queued: false });
+  try {
+    const onProgress = makeOnProgress(scanScope);
+    const out = await runDiscovery({ db, redis, input: payload, onProgress });
+    runsTotal.inc({ status: out.status === 'canary_abort' ? 'failed' : 'completed' });
+    await logAudit(db, req, { resource_id: out.run_id, summary_suffix: out.summary ? ` | assets=${out.summary.discovered_assets} edges=${out.summary.topology_edges}` : '' });
+    res.status(202).json({ ...out, queued: false });
+  } finally {
+    await releaseScanAdmission(redis, admission).catch(() => {});
+  }
 }));
 
 app.get('/api/discovery/runs', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     `SELECT * FROM observe_discovery_runs WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY started_at DESC LIMIT 100`,
     [scope.tenant_id, scope.site_id, scope.edge_id]
@@ -195,7 +291,7 @@ app.get('/api/discovery/runs', requireAuthOpt, asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/discovery/assets', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     `SELECT * FROM observe_assets WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY updated_at DESC LIMIT 500`,
     [scope.tenant_id, scope.site_id, scope.edge_id]
@@ -205,7 +301,7 @@ app.get('/api/discovery/assets', requireAuthOpt, asyncRoute(async (req, res) => 
 
 app.get('/api/discovery/findings', requireAuthOpt, asyncRoute(async (req, res) => {
   const runId = req.query.run_id;
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const sql = runId
     ? 'SELECT * FROM observe_discovery_findings WHERE run_id = $1 AND tenant_id = $2 AND site_id = $3 AND edge_id = $4 ORDER BY observed_at DESC LIMIT 500'
     : 'SELECT * FROM observe_discovery_findings WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY observed_at DESC LIMIT 500';
@@ -215,7 +311,7 @@ app.get('/api/discovery/findings', requireAuthOpt, asyncRoute(async (req, res) =
 }));
 
 app.get('/api/discovery/topology', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     'SELECT * FROM observe_topology_edges WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY observed_at DESC LIMIT 500',
     [scope.tenant_id, scope.site_id, scope.edge_id]
@@ -224,7 +320,7 @@ app.get('/api/discovery/topology', requireAuthOpt, asyncRoute(async (req, res) =
 }));
 
 app.get('/api/discovery/fingerprints', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     'SELECT * FROM observe_service_fingerprints WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY observed_at DESC LIMIT 500',
     [scope.tenant_id, scope.site_id, scope.edge_id]
@@ -233,7 +329,7 @@ app.get('/api/discovery/fingerprints', requireAuthOpt, asyncRoute(async (req, re
 }));
 
 app.get('/api/discovery/policies', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     'SELECT * FROM observe_discovery_policies WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 ORDER BY updated_at DESC LIMIT 100',
     [scope.tenant_id, scope.site_id, scope.edge_id]
@@ -241,13 +337,13 @@ app.get('/api/discovery/policies', requireAuthOpt, asyncRoute(async (req, res) =
   res.json({ policies: r.rows, total: r.rowCount });
 }));
 
-app.post('/api/discovery/policies', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/policies', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const b = req.body || {};
   if (!b.name || typeof b.name !== 'string') return res.status(400).json({ error: 'name é obrigatório' });
   if (b.scan_profile && !['safe', 'balanced', 'aggressive'].includes(b.scan_profile)) {
     return res.status(400).json({ error: 'scan_profile inválido' });
   }
-  const scope = parseScope(b);
+  const scope = requestScope(req, b);
   const r = await db.query(
     `INSERT INTO observe_discovery_policies
       (id, tenant_id, site_id, edge_id, name, scan_profile, active_enabled, passive_enabled, allowed_ranges, blocked_ranges,
@@ -265,7 +361,7 @@ app.post('/api/discovery/policies', requireAuth, asyncRoute(async (req, res) => 
   res.status(201).json({ policy: r.rows[0] });
 }));
 
-app.patch('/api/discovery/policies/:id', requireAuth, asyncRoute(async (req, res) => {
+app.patch('/api/discovery/policies/:id', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const { id } = req.params;
   const b = req.body || {};
   if (b.scan_profile && !['safe', 'balanced', 'aggressive'].includes(b.scan_profile)) {
@@ -289,10 +385,13 @@ app.patch('/api/discovery/policies/:id', requireAuth, asyncRoute(async (req, res
   maybe('auto_icinga_sync', b.auto_icinga_sync);
   maybe('is_default', b.is_default);
   if (!sets.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  const scope = requestScope(req, b);
   sets.push(`updated_at = NOW()`);
-  vals.push(id);
+  vals.push(id, scope.tenant_id, scope.site_id, scope.edge_id);
   const r = await db.query(
-    `UPDATE observe_discovery_policies SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
+    `UPDATE observe_discovery_policies SET ${sets.join(', ')}
+     WHERE id = $${i} AND tenant_id = $${i + 1} AND site_id = $${i + 2} AND edge_id = $${i + 3}
+     RETURNING *`,
     vals
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Política não encontrada' });
@@ -300,10 +399,12 @@ app.patch('/api/discovery/policies/:id', requireAuth, asyncRoute(async (req, res
   res.json({ policy: r.rows[0] });
 }));
 
-app.delete('/api/discovery/policies/:id', requireAuth, asyncRoute(async (req, res) => {
+app.delete('/api/discovery/policies/:id', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.body);
   const r = await db.query(
-    'DELETE FROM observe_discovery_policies WHERE id = $1 RETURNING id, name',
-    [req.params.id]
+    `DELETE FROM observe_discovery_policies
+     WHERE id = $1 AND tenant_id = $2 AND site_id = $3 AND edge_id = $4 RETURNING id, name`,
+    [req.params.id, scope.tenant_id, scope.site_id, scope.edge_id]
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Política não encontrada' });
   await logAudit(db, req, { resource_id: req.params.id, resource_key: r.rows[0].name });
@@ -312,7 +413,7 @@ app.delete('/api/discovery/policies/:id', requireAuth, asyncRoute(async (req, re
 
 // ── Targets CRUD ──────────────────────────────────────────────────────────────
 app.get('/api/discovery/targets', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     `SELECT t.*, p.name AS policy_name FROM observe_discovery_targets t
      LEFT JOIN observe_discovery_policies p ON t.policy_id = p.id
@@ -323,14 +424,14 @@ app.get('/api/discovery/targets', requireAuthOpt, asyncRoute(async (req, res) =>
   res.json({ targets: r.rows, total: r.rowCount });
 }));
 
-app.post('/api/discovery/targets', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/targets', requireAuth, requireWrite, requireQuota('targets'), asyncRoute(async (req, res) => {
   const b = req.body || {};
   if (!b.address) return res.status(400).json({ error: 'address é obrigatório' });
   const validTypes = ['ip', 'hostname', 'cidr', 'range'];
   if (b.discovery_type && !validTypes.includes(b.discovery_type)) {
     return res.status(400).json({ error: 'discovery_type inválido' });
   }
-  const scope = parseScope(b);
+  const scope = requestScope(req, b);
   const r = await db.query(
     `INSERT INTO observe_discovery_targets
       (id, tenant_id, site_id, edge_id, policy_id, discovery_type, address, label, enabled, metadata)
@@ -348,7 +449,7 @@ app.post('/api/discovery/targets', requireAuth, asyncRoute(async (req, res) => {
   res.status(201).json({ target: r.rows[0] });
 }));
 
-app.patch('/api/discovery/targets/:id', requireAuth, asyncRoute(async (req, res) => {
+app.patch('/api/discovery/targets/:id', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const { id } = req.params;
   const b = req.body || {};
   const sets = [];
@@ -361,10 +462,13 @@ app.patch('/api/discovery/targets/:id', requireAuth, asyncRoute(async (req, res)
   maybe('policy_id', b.policy_id);
   maybe('discovery_type', b.discovery_type);
   if (!sets.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  const scope = requestScope(req, b);
   sets.push(`updated_at = NOW()`);
-  vals.push(id);
+  vals.push(id, scope.tenant_id, scope.site_id, scope.edge_id);
   const r = await db.query(
-    `UPDATE observe_discovery_targets SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
+    `UPDATE observe_discovery_targets SET ${sets.join(', ')}
+     WHERE id = $${i} AND tenant_id = $${i + 1} AND site_id = $${i + 2} AND edge_id = $${i + 3}
+     RETURNING *`,
     vals
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Target não encontrado' });
@@ -372,10 +476,12 @@ app.patch('/api/discovery/targets/:id', requireAuth, asyncRoute(async (req, res)
   res.json({ target: r.rows[0] });
 }));
 
-app.delete('/api/discovery/targets/:id', requireAuth, asyncRoute(async (req, res) => {
+app.delete('/api/discovery/targets/:id', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.body);
   const r = await db.query(
-    'DELETE FROM observe_discovery_targets WHERE id = $1 RETURNING id, address',
-    [req.params.id]
+    `DELETE FROM observe_discovery_targets
+     WHERE id = $1 AND tenant_id = $2 AND site_id = $3 AND edge_id = $4 RETURNING id, address`,
+    [req.params.id, scope.tenant_id, scope.site_id, scope.edge_id]
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Target não encontrado' });
   await logAudit(db, req, { resource_id: req.params.id, resource_key: r.rows[0].address });
@@ -385,7 +491,7 @@ app.delete('/api/discovery/targets/:id', requireAuth, asyncRoute(async (req, res
 // ── Assets — atualizar ciclo de vida ─────────────────────────────────────────
 const VALID_LIFECYCLE = ['discovered', 'approved', 'monitored', 'ignored', 'quarantined', 'disappeared'];
 
-app.patch('/api/discovery/assets/:id', requireAuth, asyncRoute(async (req, res) => {
+app.patch('/api/discovery/assets/:id', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const { id } = req.params;
   const b = req.body || {};
   if (b.lifecycle_state && !VALID_LIFECYCLE.includes(b.lifecycle_state)) {
@@ -399,10 +505,13 @@ app.patch('/api/discovery/assets/:id', requireAuth, asyncRoute(async (req, res) 
   maybe('criticality', b.criticality);
   maybe('display_name', b.display_name);
   if (!sets.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  const scope = requestScope(req, b);
   sets.push(`updated_at = NOW()`);
-  vals.push(id);
+  vals.push(id, scope.tenant_id, scope.site_id, scope.edge_id);
   const r = await db.query(
-    `UPDATE observe_assets SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
+    `UPDATE observe_assets SET ${sets.join(', ')}
+     WHERE id = $${i} AND tenant_id = $${i + 1} AND site_id = $${i + 2} AND edge_id = $${i + 3}
+     RETURNING *`,
     vals
   );
   if (!r.rowCount) return res.status(404).json({ error: 'Ativo não encontrado' });
@@ -410,7 +519,7 @@ app.patch('/api/discovery/assets/:id', requireAuth, asyncRoute(async (req, res) 
   res.json({ asset: r.rows[0] });
 }));
 
-app.post('/api/discovery/passive/events', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/passive/events', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const events = Array.isArray(req.body?.events) ? req.body.events : [req.body];
   const accepted = await ingestPassiveEvents(events);
   await logAudit(db, req, { summary_suffix: `events=${accepted}` });
@@ -419,7 +528,7 @@ app.post('/api/discovery/passive/events', requireAuth, asyncRoute(async (req, re
 
 // ── Audit log (Enterprise) ────────────────────────────────────────────────────
 app.get('/api/discovery/audit', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const limit = Math.min(Math.max(1, parseInt(req.query.limit || '50', 10)), 500);
 
   const conditions = [
@@ -471,7 +580,7 @@ app.get('/api/discovery/audit', requireAuthOpt, asyncRoute(async (req, res) => {
 app.get('/api/discovery/history', requireAuthOpt, asyncRoute(async (req, res) => {
   const assetId = req.query.asset_id;
   if (!assetId) return res.status(400).json({ error: 'asset_id is required' });
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     `SELECT * FROM observe_asset_changes WHERE asset_id = $1 AND tenant_id = $2 AND site_id = $3 AND edge_id = $4 ORDER BY changed_at DESC LIMIT 500`,
     [assetId, scope.tenant_id, scope.site_id, scope.edge_id]
@@ -482,7 +591,7 @@ app.get('/api/discovery/history', requireAuthOpt, asyncRoute(async (req, res) =>
 // ── Services per asset (Enterprise) ─────────────────────────────────────
 app.get('/api/discovery/assets/:id/services', requireAuth, asyncRoute(async (req, res) => {
   const { id } = req.params;
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     `SELECT s.id, s.service_key, s.service_name, s.protocol, s.port, s.status, s.fingerprint,
             s.first_seen_at, s.last_seen_at
@@ -495,7 +604,7 @@ app.get('/api/discovery/assets/:id/services', requireAuth, asyncRoute(async (req
 }));
 
 app.get('/api/discovery/prometheus/http-sd', asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     `SELECT a.tenant_id, a.site_id, a.edge_id, a.asset_name, a.primary_ip, s.port, s.protocol
      FROM observe_assets a
@@ -531,7 +640,7 @@ app.get('/api/discovery/prometheus/http-sd', asyncRoute(async (req, res) => {
 
 app.get('/api/discovery/graph/shortest-path', requireAuth, asyncRoute(async (req, res) => {
   if (!neo4jEnabled()) return res.status(503).json({ error: 'neo4j_not_enabled' });
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const from = String(req.query.from || '').trim();
   const to = String(req.query.to || '').trim();
   if (!from || !to) return res.status(400).json({ error: 'from e to são obrigatórios' });
@@ -546,7 +655,7 @@ app.get('/api/discovery/graph/shortest-path', requireAuth, asyncRoute(async (req
 
 app.get('/api/discovery/graph/blast-radius', requireAuth, asyncRoute(async (req, res) => {
   if (!neo4jEnabled()) return res.status(503).json({ error: 'neo4j_not_enabled' });
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const asset = String(req.query.asset_key || '').trim();
   if (!asset) return res.status(400).json({ error: 'asset_key é obrigatório' });
   const out = await blastRadius({
@@ -559,14 +668,12 @@ app.get('/api/discovery/graph/blast-radius', requireAuth, asyncRoute(async (req,
 }));
 
 app.get('/observe/discovery', (_req, res) => {
-  const token = signInternalToken({ sub: 'ui', role: 'admin' });
-  const html = DISCOVERY_UI_HTML.replace('"__TOKEN_PLACEHOLDER__"', JSON.stringify(token));
   res.set('Content-Type', 'text/html; charset=utf-8');
-  res.end(html);
+  res.end(DISCOVERY_UI_HTML);
 });
 
 app.get('/observe/discovery/data/summary', requireAuthOpt, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const [runs, assets, findings, fps, edges, policies, targets, services] = await Promise.all([
     db.query('SELECT id, status, started_at, completed_at, summary FROM observe_discovery_runs WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 ORDER BY started_at DESC LIMIT 50', [scope.tenant_id, scope.site_id, scope.edge_id]),
     db.query('SELECT id, asset_name, display_name, primary_ip, vendor, product, lifecycle_state, criticality, confidence, updated_at FROM observe_assets WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 ORDER BY updated_at DESC LIMIT 500', [scope.tenant_id, scope.site_id, scope.edge_id]),
@@ -617,13 +724,14 @@ const { snmpDeepDiscover } = require('./scanners/snmp-deep');
 const { collectMetrics: collectSnmpMetrics } = require('./scanners/snmp-metrics');
 const { discoverRoutingProtocols } = require('./scanners/topology-protocols');
 
-app.post('/api/discovery/snmp/deep/:host', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/snmp/deep/:host', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const { host } = req.params;
+  if (!isValidHost(host)) return res.status(400).json({ error: 'host inválido' });
   const community = req.body?.community || req.query?.community || 'public';
   const result = await snmpDeepDiscover(host, { community });
 
   // Persiste resultado
-  const scope = parseScope(req.body);
+  const scope = requestScope(req, req.body);
   await db.query(
     `INSERT INTO observe_snmp_results
      (tenant_id, site_id, edge_id, asset_id, host, sys_descr, sys_object_id, sys_name, sys_uptime,
@@ -654,11 +762,27 @@ app.post('/api/discovery/snmp/deep/:host', requireAuth, asyncRoute(async (req, r
      result.reachable, result.auth_failure, JSON.stringify(result.errors)]
   );
 
-  res.json(result);
+  const alertRulesResult = await db.query(
+    `SELECT * FROM observe_alert_rules WHERE tenant_id=$1 AND site_id=$2 AND enabled=true ORDER BY name`,
+    [scope.tenant_id, scope.site_id]
+  );
+  const alertRules = alertRulesResult.rows.length ? alertRulesResult.rows.map((rule) => ({
+    ...rule,
+    conditions: typeof rule.conditions === 'string' ? JSON.parse(rule.conditions) : rule.conditions,
+    transports: typeof rule.transports === 'string' ? JSON.parse(rule.transports) : rule.transports,
+  })) : BUILTIN_RULES;
+  const alerts = await evaluateAlerts(alertRules, {
+    host,
+    snmp_up: result.reachable ? 1 : 0,
+    asset_id: null,
+  }, scope, db);
+
+  await logAudit(db, req, { resource_id: host });
+  res.json({ ...result, alerts_fired: alerts.length });
 }));
 
 app.get('/api/discovery/snmp/results', requireAuth, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const host = req.query.host;
   let query = 'SELECT * FROM observe_snmp_results WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3';
   const params = [scope.tenant_id, scope.site_id, scope.edge_id];
@@ -670,7 +794,7 @@ app.get('/api/discovery/snmp/results', requireAuth, asyncRoute(async (req, res) 
 
 app.get('/api/discovery/snmp/results/:host', requireAuth, asyncRoute(async (req, res) => {
   const { host } = req.params;
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     'SELECT * FROM observe_snmp_results WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND host=$4',
     [scope.tenant_id, scope.site_id, scope.edge_id, host]
@@ -683,6 +807,7 @@ app.get('/api/discovery/snmp/results/:host', requireAuth, asyncRoute(async (req,
 
 app.get('/api/discovery/snmp/metrics/:host', requireAuth, asyncRoute(async (req, res) => {
   const { host } = req.params;
+  if (!isValidHost(host)) return res.status(400).json({ error: 'host inválido' });
   const community = req.query.community || 'public';
   const format = req.query.format || 'json';
 
@@ -711,11 +836,12 @@ app.get('/api/discovery/snmp/metrics/:host', requireAuth, asyncRoute(async (req,
 
 app.get('/api/discovery/snmp/routing/:host', requireAuth, asyncRoute(async (req, res) => {
   const { host } = req.params;
+  if (!isValidHost(host)) return res.status(400).json({ error: 'host inválido' });
   const community = req.query.community || 'public';
   const result = await discoverRoutingProtocols(host, { community });
 
   // Persiste
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   await db.query(
     `INSERT INTO observe_snmp_results
      (tenant_id, site_id, edge_id, host, ospf, bgp, vrrp, collected_at)
@@ -736,15 +862,15 @@ const { IpamRepository, parseSubnet, listSubnetIps, splitSubnet } = require('./e
 const ipamRepo = new IpamRepository(db);
 
 app.get('/api/discovery/ipam/subnets', requireAuth, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const subnets = await ipamRepo.getSubnets({ tenant_id: scope.tenant_id, site_id: scope.site_id });
   res.json({ subnets, total: subnets.length });
 }));
 
-app.post('/api/discovery/ipam/subnets', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/ipam/subnets', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const { cidr, name, description, parent_id, vlan_id, gateway } = req.body || {};
   if (!cidr) return res.status(400).json({ error: 'cidr é obrigatório' });
-  const scope = parseScope(req.body);
+  const scope = requestScope(req, req.body);
   const subnet = await ipamRepo.createSubnet({
     cidr, name, description, parent_id,
     site_id: scope.site_id, tenant_id: scope.tenant_id, vlan_id, gateway,
@@ -755,8 +881,9 @@ app.post('/api/discovery/ipam/subnets', requireAuth, asyncRoute(async (req, res)
 
 app.get('/api/discovery/ipam/subnets/:cidr/ips', requireAuth, asyncRoute(async (req, res) => {
   const { cidr } = req.params;
-  const ips = await ipamRepo.getIpsInSubnet(cidr);
-  const utilization = await ipamRepo.getSubnetUtilization(cidr);
+  const scope = requestScope(req, req.query);
+  const ips = await ipamRepo.getIpsInSubnet(cidr, scope.tenant_id, scope.site_id);
+  const utilization = await ipamRepo.getSubnetUtilization(cidr, scope.tenant_id, scope.site_id);
   res.json({ cidr, ips, utilization });
 }));
 
@@ -768,7 +895,8 @@ app.get('/api/discovery/ipam/subnets/:cidr/info', requireAuth, asyncRoute(async 
 
 app.get('/api/discovery/ipam/find/:ip', requireAuth, asyncRoute(async (req, res) => {
   const { ip } = req.params;
-  const subnet = await ipamRepo.findSubnetForIp(ip);
+  const scope = requestScope(req, req.query);
+  const subnet = await ipamRepo.findSubnetForIp(ip, scope.tenant_id, scope.site_id);
   res.json({ ip, subnet: subnet || null });
 }));
 
@@ -777,12 +905,12 @@ app.get('/api/discovery/ipam/find/:ip', requireAuth, asyncRoute(async (req, res)
 const { evaluateAlerts, BUILTIN_RULES } = require('./engine/alerting');
 
 app.get('/api/discovery/alerts', requireAuth, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const limit = Math.min(parseInt(req.query.limit || '100', 10), 1000);
   const severity = req.query.severity;
-  let query = 'SELECT * FROM observe_alerts WHERE tenant_id=$1 AND site_id=$2';
-  const params = [scope.tenant_id, scope.site_id];
-  if (severity) { query += ' AND severity=$3'; params.push(severity); }
+  let query = 'SELECT * FROM observe_alerts WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3';
+  const params = [scope.tenant_id, scope.site_id, scope.edge_id];
+  if (severity) { query += ' AND severity=$4'; params.push(severity); }
   query += ' ORDER BY fired_at DESC LIMIT $' + (params.length + 1);
   params.push(limit);
   const r = await db.query(query, params);
@@ -790,20 +918,21 @@ app.get('/api/discovery/alerts', requireAuth, asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/discovery/alerts/active', requireAuth, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
-    'SELECT * FROM observe_alerts WHERE tenant_id=$1 AND site_id=$2 AND resolved_at IS NULL ORDER BY fired_at DESC LIMIT 500',
-    [scope.tenant_id, scope.site_id]
+    'SELECT * FROM observe_alerts WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND resolved_at IS NULL ORDER BY fired_at DESC LIMIT 500',
+    [scope.tenant_id, scope.site_id, scope.edge_id]
   );
   res.json({ alerts: r.rows, total: r.rowCount });
 }));
 
-app.post('/api/discovery/alerts/:id/acknowledge', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/alerts/:id/acknowledge', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const { id } = req.params;
+  const scope = requestScope(req, req.body);
   const r = await db.query(
     `UPDATE observe_alerts SET acknowledged=true, acknowledged_by=$2, acknowledged_at=NOW()
-     WHERE id=$1 AND acknowledged=false RETURNING *`,
-    [id, req.user?.sub || 'unknown']
+     WHERE id=$1 AND tenant_id=$3 AND site_id=$4 AND edge_id=$5 AND acknowledged=false RETURNING *`,
+    [id, req.auth?.sub || 'unknown', scope.tenant_id, scope.site_id, scope.edge_id]
   );
   if (!r.rows.length) return res.status(404).json({ error: 'not_found_or_already_acked' });
   await logAudit(db, req, { resource_id: id });
@@ -811,7 +940,7 @@ app.post('/api/discovery/alerts/:id/acknowledge', requireAuth, asyncRoute(async 
 }));
 
 app.get('/api/discovery/alerts/rules', requireAuth, asyncRoute(async (req, res) => {
-  const scope = parseScope(req.query);
+  const scope = requestScope(req, req.query);
   const r = await db.query(
     'SELECT * FROM observe_alert_rules WHERE tenant_id=$1 AND site_id=$2 ORDER BY name',
     [scope.tenant_id, scope.site_id]
@@ -827,39 +956,139 @@ app.get('/api/discovery/alerts/rules', requireAuth, asyncRoute(async (req, res) 
 
 const { backupConfig } = require('./engine/config-backup');
 
-app.post('/api/discovery/config-backup/:host', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/discovery/config-backup/:host', requireAuth, requireWrite, asyncRoute(async (req, res) => {
   const { host } = req.params;
+  if (!isValidHost(host)) return res.status(400).json({ error: 'host inválido' });
+  if (req.body?.ssh_port != null && !isValidPort(req.body.ssh_port)) return res.status(400).json({ error: 'ssh_port inválida' });
   const asset = {
     host,
+    ...requestScope(req, req.body),
     ssh_user: req.body?.ssh_user,
     ssh_password: req.body?.ssh_password,
     ssh_port: req.body?.ssh_port,
     vendor: req.body?.vendor,
   };
   const result = await backupConfig(asset, db);
+  await logAudit(db, req, { resource_id: host });
   res.json(result);
 }));
 
 app.get('/api/discovery/config-backup', requireAuth, asyncRoute(async (req, res) => {
   const host = req.query.host;
+  const scope = requestScope(req, req.query);
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
-  let query = 'SELECT id, host, vendor, method, success, sha256, lines, error, collected_at FROM observe_config_backups';
-  const params = [];
-  if (host) { query += ' WHERE host=$1'; params.push(host); }
+  let query = 'SELECT id, host, vendor, method, success, sha256, lines, error, collected_at FROM observe_config_backups WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3';
+  const params = [scope.tenant_id, scope.site_id, scope.edge_id];
+  if (host) { query += ' AND host=$4'; params.push(host); }
   query += ' ORDER BY collected_at DESC LIMIT $' + (params.length + 1);
   params.push(limit);
   const r = await db.query(query, params);
   res.json({ backups: r.rows, total: r.rowCount });
 }));
 
+// ── Schedules e quotas ────────────────────────────────────────────────────
+app.get('/api/discovery/schedules', requireAuth, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.query);
+  const r = await db.query(
+    `SELECT * FROM observe_discovery_schedules WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 ORDER BY name`,
+    [scope.tenant_id, scope.site_id, scope.edge_id]
+  );
+  res.json({ schedules: r.rows, total: r.rowCount });
+}));
+
+app.post('/api/discovery/schedules', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.body);
+  const { name, cron_expression, policy_id, profile_override, enabled = true } = req.body || {};
+  if (!name || !cron_expression) return res.status(400).json({ error: 'name e cron_expression são obrigatórios' });
+  const next = calcNextRun(cron_expression, new Date());
+  if (!next) return res.status(400).json({ error: 'cron_expression inválida ou sem execução nos próximos 366 dias' });
+  if (profile_override && !['safe', 'balanced', 'aggressive'].includes(profile_override)) return res.status(400).json({ error: 'profile_override inválido' });
+  const r = await db.query(
+    `INSERT INTO observe_discovery_schedules
+      (tenant_id,site_id,edge_id,policy_id,name,cron_expression,profile_override,enabled,next_run_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [scope.tenant_id, scope.site_id, scope.edge_id, policy_id || null, String(name).slice(0, 200), cron_expression, profile_override || null, enabled !== false, next]
+  );
+  await logAudit(db, req, { resource_id: r.rows[0].id });
+  res.status(201).json({ schedule: r.rows[0] });
+}));
+
+app.patch('/api/discovery/schedules/:id', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.body);
+  const allowed = ['name', 'cron_expression', 'profile_override', 'enabled'];
+  const sets = []; const params = [req.params.id, scope.tenant_id, scope.site_id, scope.edge_id];
+  for (const field of allowed) {
+    if (req.body?.[field] === undefined) continue;
+    if (field === 'cron_expression' && !calcNextRun(req.body[field], new Date())) return res.status(400).json({ error: 'cron_expression inválida' });
+    if (field === 'profile_override' && req.body[field] && !['safe', 'balanced', 'aggressive'].includes(req.body[field])) return res.status(400).json({ error: 'profile_override inválido' });
+    params.push(req.body[field]); sets.push(`${field}=$${params.length}`);
+  }
+  if (!sets.length) return res.status(400).json({ error: 'nenhum campo atualizável' });
+  if (req.body.cron_expression) { params.push(calcNextRun(req.body.cron_expression, new Date())); sets.push(`next_run_at=$${params.length}`); }
+  const r = await db.query(
+    `UPDATE observe_discovery_schedules SET ${sets.join(',')},updated_at=NOW()
+     WHERE id=$1 AND tenant_id=$2 AND site_id=$3 AND edge_id=$4 RETURNING *`, params
+  );
+  if (!r.rows.length) return res.status(404).json({ error: 'not_found' });
+  await logAudit(db, req, { resource_id: req.params.id });
+  res.json({ schedule: r.rows[0] });
+}));
+
+app.delete('/api/discovery/schedules/:id', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.query);
+  const r = await db.query(
+    `DELETE FROM observe_discovery_schedules WHERE id=$1 AND tenant_id=$2 AND site_id=$3 AND edge_id=$4 RETURNING id`,
+    [req.params.id, scope.tenant_id, scope.site_id, scope.edge_id]
+  );
+  if (!r.rows.length) return res.status(404).json({ error: 'not_found' });
+  await logAudit(db, req, { resource_id: req.params.id });
+  res.json({ deleted: true, id: req.params.id });
+}));
+
+app.get('/api/discovery/quotas', requireAuth, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.query);
+  const { getQuota } = require('./quotas');
+  res.json({ quota: await getQuota(db, scope.tenant_id) });
+}));
+
+// ── Remote agents ─────────────────────────────────────────────────────────
+app.get('/api/discovery/agents', requireAuth, asyncRoute(async (req, res) => {
+  const scope = requestScope(req, req.query);
+  const r = await db.query(
+    `SELECT agent_id,hostname,subnets,capabilities,version,status,last_seen_at,created_at,updated_at
+     FROM observe_discovery_agents WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 ORDER BY agent_id`,
+    [scope.tenant_id, scope.site_id, scope.edge_id]
+  );
+  res.json({ agents: r.rows, total: r.rowCount });
+}));
+
+app.post('/api/discovery/agents/register', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  if (!validAgentId(req.body?.agent_id) || !req.body?.hostname) return res.status(400).json({ error: 'agent_id ou hostname inválido' });
+  const scope = requestScope(req, req.body);
+  res.status(201).json(await handleAgentRegister(db, req.body, scope));
+}));
+
+app.post('/api/discovery/agents/heartbeat', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  if (!validAgentId(req.body?.agent_id)) return res.status(400).json({ error: 'agent_id inválido' });
+  const scope = requestScope(req, req.body);
+  const result = await handleAgentHeartbeat(db, req.body, scope);
+  res.json(result);
+}));
+
+app.post('/api/discovery/agents/report', requireAuth, requireWrite, asyncRoute(async (req, res) => {
+  if (!validAgentId(req.body?.agent_id)) return res.status(400).json({ error: 'agent_id inválido' });
+  if (!Array.isArray(req.body?.assets) || !Array.isArray(req.body?.findings) || req.body.assets.length > 1000 || req.body.findings.length > 5000) {
+    return res.status(400).json({ error: 'report inválido ou acima do limite' });
+  }
+  const scope = requestScope(req, req.body);
+  res.json(await handleAgentReport({ db, redis, body: { ...req.body, scope } }));
+}));
+
 // ── 404 ─────────────────────────────────────────────────────────────────────
 
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 
-app.use((err, _req, res, _next) => {
-  log('error', 'Unhandled discovery error', { err: err.message });
-  res.status(500).json({ error: 'internal_error' });
-});
+app.use(createHttpErrorHandler({ log, service: 'r-observe-discovery' }));
 
 if (process.env.NODE_ENV === 'development') {
   import('vite').then(({ createServer: createVite }) =>
@@ -896,8 +1125,18 @@ autoAttachAllNetworks().catch(e => log('warn', 'Docker auto-attach failed', { er
 const lifecycle = createLifecycle({ label: 'r-observe-discovery', log });
 lifecycle.addCloser('db', () => db.end());
 if (redis) lifecycle.addCloser('redis', () => redis.quit());
+if (queueRedis) {
+  lifecycle.addCloser('reliableQueueConsumer', () => reliableQueueConsumer.stop());
+  lifecycle.addCloser('queueRedis', () => queueRedis.quit());
+}
 lifecycle.addCloser('neo4j', () => closeNeo4jDriver());
 lifecycle.addCloser('passiveReceivers', () => { try { if (typeof stopPassiveReceivers === 'function') stopPassiveReceivers(); } catch (_) {} });
+const stopScheduler = startScheduler({ db, redis });
+lifecycle.addCloser('scheduler', stopScheduler);
+const stopRetention = startRetention({ db });
+lifecycle.addCloser('retention', stopRetention);
+const stopRunRecovery = startRunRecovery({ db });
+lifecycle.addCloser('runRecovery', stopRunRecovery);
 
 const server = app.listen(PORT, '0.0.0.0', () => log('info', `Discovery API on :${PORT}`));
 lifecycle.onServer(server);
@@ -906,36 +1145,79 @@ lifecycle.onServer(server);
 const AGENT_OFFLINE_CHECK_ENABLED = process.env.AGENT_OFFLINE_CHECK_ENABLED !== 'false';
 if (AGENT_OFFLINE_CHECK_ENABLED && db) {
   const { startOfflineDetection, stopOfflineDetection } = require('./scanners/agents');
-  startOfflineDetection(db);
+  startOfflineDetection(db, redis);
   lifecycle.addCloser('agentOfflineDetection', () => { try { stopOfflineDetection(); } catch (_) {} });
 }
 lifecycle.start();
 
 async function startScanQueueConsumer() {
-  if (!redis || !SCAN_QUEUE_ENABLED) return;
+  if (!queueRedis || !reliableQueueConsumer || !SCAN_QUEUE_ENABLED) return;
+  const recovered = await reliableQueueConsumer.start();
   log('info', 'Scan queue consumer enabled', { queue: 'observe:scan:network' });
-  for (;;) {
+  if (recovered) log('warn', 'Recovered orphaned scan jobs', { recovered });
+  while (!reliableQueueConsumer.isStopped()) {
+    let raw = null;
+    let task = null;
     try {
-      const item = await redis.blpop('observe:scan:network', 1);
-      if (!item) continue;
-      const [, raw] = item;
-      let task = {};
-      try { task = JSON.parse(raw); } catch { task = {}; }
+      raw = await reliableQueueConsumer.claim(1);
+      if (!raw) continue;
+      try {
+        task = parseQueueJob(raw);
+      } catch (parseError) {
+        await reliableQueueConsumer.reject(raw, null, parseError);
+        log('warn', 'Invalid scan queue payload moved to dead letter', { err: parseError.message });
+        continue;
+      }
+      if (await reliableQueueConsumer.alreadyCompleted(task)) {
+        await reliableQueueConsumer.acknowledge(raw, null);
+        await releaseScanAdmission(redis, admissionFromJob(task)).catch(() => {});
+        continue;
+      }
       const scope = parseScope(task);
       const targets = Array.isArray(task.targets) ? task.targets : undefined;
-      await runDiscovery({
-        db,
-        redis,
-        input: {
-          ...scope,
-          profile: task.profile || 'safe',
-          trigger: 'queue:observe:scan:network',
-          subnet: task.subnet || null,
-          targets,
-          docker_discovery_enabled: DOCKER_DISCOVERY_ENABLED,
-        },
-        onProgress: makeOnProgress(),
-      });
+      try {
+        await runWithTenant(scope.tenant_id, async () => {
+          const out = await runDiscovery({
+            db,
+            redis,
+            input: {
+              ...scope,
+              policy_id: task.policy_id || null,
+              profile: task.profile || 'safe',
+              trigger: task.trigger || 'queue:observe:scan:network',
+              queue_job_id: task.queue_job_id,
+              subnet: task.subnet || null,
+              targets,
+              docker_discovery_enabled: DOCKER_DISCOVERY_ENABLED,
+            },
+            onProgress: makeOnProgress(scope),
+          });
+          if (task.schedule_id) {
+            await db.query(
+              `UPDATE observe_discovery_schedules SET last_run_status=$5, updated_at=NOW()
+               WHERE id=$1 AND tenant_id=$2 AND site_id=$3 AND edge_id=$4`,
+              [task.schedule_id, scope.tenant_id, scope.site_id, scope.edge_id,
+                out.status === 'canary_abort' ? 'failed' : 'completed']
+            );
+          }
+        });
+        await reliableQueueConsumer.acknowledge(raw, task);
+        await releaseScanAdmission(redis, admissionFromJob(task)).catch(() => {});
+      } catch (scanError) {
+        if (task.schedule_id) {
+          await runWithTenant(scope.tenant_id, () => db.query(
+            `UPDATE observe_discovery_schedules SET last_run_status='failed', updated_at=NOW()
+             WHERE id=$1 AND tenant_id=$2 AND site_id=$3 AND edge_id=$4`,
+            [task.schedule_id, scope.tenant_id, scope.site_id, scope.edge_id]
+          )).catch(() => {});
+        }
+        const rejected = await reliableQueueConsumer.reject(raw, task, scanError);
+        if (!rejected.retry) await releaseScanAdmission(redis, admissionFromJob(task)).catch(() => {});
+        raw = null;
+        log('warn', rejected.retry ? 'Scan job scheduled for retry' : 'Scan job moved to dead letter', {
+          queue_job_id: task.queue_job_id, attempt: rejected.attempt, err: scanError.message,
+        });
+      }
     } catch (e) {
       log('warn', 'Scan queue consumer error', { err: e.message });
     }
@@ -958,9 +1240,9 @@ const DISCOVERY_UI_HTML = `<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Results · R-Observe Discovery</title>
   ${IS_DEV ? DEV_SCRIPT : '<link rel="stylesheet" href="/observe/discovery/data/discovery.css">'}
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="/observe/discovery/data/vendor/react.min.js"></script>
+  <script src="/observe/discovery/data/vendor/react-dom.min.js"></script>
+  <script src="/observe/discovery/data/vendor/d3.min.js"></script>
 </head>
 <body>
   <div class="topbar">
@@ -972,7 +1254,6 @@ const DISCOVERY_UI_HTML = `<!doctype html>
   <div id="app"></div>
   <script>
   const e = React.createElement;
-  const TOKEN = "__TOKEN_PLACEHOLDER__";
   const API = '/observe/discovery/api/discovery';
 
   // ── Auth + Feedback ──────────────────────────────────────────────────────────
@@ -980,9 +1261,7 @@ const DISCOVERY_UI_HTML = `<!doctype html>
   function showFeedback(msg) { if (_feedbackSet) _feedbackSet(msg); }
 
   function authHeaders() {
-    const h = {};
-    if (TOKEN && TOKEN.length > 10) h['x-internal-token'] = TOKEN;
-    return h;
+    return {};
   }
 
   // ── Traduções ────────────────────────────────────────────────────────────────
@@ -1098,7 +1377,7 @@ const DISCOVERY_UI_HTML = `<!doctype html>
       e(Btn, { onClick:()=>setPage(p=>p+1),  disabled:page>=total }, 'Próxima ›'),
       e(Btn, { onClick:()=>setPage(total),   disabled:page>=total }, '»'),
       setPageSize
-        ? e('select', { value:pageSize, onChange:ev=>{ setPageSize(Number(ev.target.value)); setPage(1); },
+        ? e('select', { value:pageSize, 'aria-label':'Itens por página', onChange:ev=>{ setPageSize(Number(ev.target.value)); setPage(1); },
             style:{ background:'#0d1117', border:'1px solid #30363d', borderRadius:5, color:'#8b949e', padding:'3px 6px', fontSize:'.78rem', marginLeft:4 }
           }, PAGE_SIZES.map(n => e('option',{key:n,value:n}, n+'/pág.')))
         : null
@@ -1790,13 +2069,13 @@ const DISCOVERY_UI_HTML = `<!doctype html>
               e('td', null, a.primary_ip||'—'),
               e('td', null, [a.vendor&&a.vendor!=='Unknown'?a.vendor:null, a.os_hint].filter(Boolean).join(' / ')||'—'),
               e('td', null, isEditing
-                ? e('select', { value:editing.form.lifecycle_state||a.lifecycle_state, onChange:ev=>setEditing({...editing,form:{...editing.form,lifecycle_state:ev.target.value}}),
+                ? e('select', { value:editing.form.lifecycle_state||a.lifecycle_state, 'aria-label':'Estado do ativo', onChange:ev=>setEditing({...editing,form:{...editing.form,lifecycle_state:ev.target.value}}),
                     style:{ background:'#0d1117', border:'1px solid #30363d', borderRadius:5, color:'#c9d1d9', padding:'3px 6px', fontSize:'.8rem' }
                   }, LIFECYCLE_OPTS.map(o => e('option',{key:o,value:o},tr(ESTADO,o))))
                 : estadoBadge(a.lifecycle_state)
               ),
               e('td', null, isEditing
-                ? e('select', { value:editing.form.criticality||a.criticality, onChange:ev=>setEditing({...editing,form:{...editing.form,criticality:ev.target.value}}),
+                ? e('select', { value:editing.form.criticality||a.criticality, 'aria-label':'Criticidade do ativo', onChange:ev=>setEditing({...editing,form:{...editing.form,criticality:ev.target.value}}),
                     style:{ background:'#0d1117', border:'1px solid #30363d', borderRadius:5, color:'#c9d1d9', padding:'3px 6px', fontSize:'.8rem' }
                   }, CRITICALITY_OPTS.map(o => e('option',{key:o,value:o},o)))
                 : e('span', { style:{color:'#8b949e',fontSize:'.82rem'} }, a.criticality||'—')
@@ -1821,6 +2100,9 @@ const DISCOVERY_UI_HTML = `<!doctype html>
   function TopologyTab({ data, scope }) {
     const { assets=[], topology=[] } = data;
     const svgRef = React.useRef(null);
+    const [modal, setModal] = React.useState(null);
+    const [zoomLevel, setZoomLevel] = React.useState(100);
+    const zoomRef = React.useRef(null);
 
     // Build graph data: nodes from assets + external refs, links from topology edges
     const graph = React.useMemo(() => {
@@ -1831,7 +2113,6 @@ const DISCOVERY_UI_HTML = `<!doctype html>
       const nodeIds = new Set();
       const links = [];
 
-      // Asset nodes
       for (const a of assets) {
         if (!nodeIds.has(a.id)) {
           nodes.push({
@@ -1840,77 +2121,56 @@ const DISCOVERY_UI_HTML = `<!doctype html>
             ip: a.primary_ip || '',
             type: 'asset',
             vendor: a.vendor,
+            product: a.product,
+            os_hint: a.os_hint,
             lifecycle_state: a.lifecycle_state,
           });
           nodeIds.add(a.id);
         }
       }
 
-      // Process topology edges
       for (const edge of topology) {
         const targetId = edge.to_asset_ref || '';
         if (!targetId) continue;
-
-        // Add external node if target is not an asset
         if (!assetMap[targetId] && !nodeIds.has(targetId)) {
           nodes.push({
-            id: targetId,
-            label: targetId,
-            ip: '',
-            type: 'external',
-            edgeType: edge.edge_type || '',
+            id: targetId, label: targetId, ip: '', type: 'external', edgeType: edge.edge_type || '',
           });
           nodeIds.add(targetId);
         }
-
-        links.push({
-          source: edge.from_asset_id,
-          target: targetId,
-          type: edge.edge_type || 'connected_to',
-        });
+        links.push({ source: edge.from_asset_id, target: targetId, type: edge.edge_type || 'connected_to' });
       }
 
       return { nodes, links, assetMap };
     }, [assets, topology]);
 
-    // D3 force simulation inside SVG via ref
+    // D3 force simulation with zoom/pan support
     React.useEffect(() => {
       if (!svgRef.current || graph.nodes.length === 0) return;
-      const svg = svgRef.current;
+      const svg = d3.select(svgRef.current);
       const W = 1000, H = 760;
 
-      svg.innerHTML = '';
+      svg.selectAll('*').remove();
 
-      // Color palette for edge types
       const edgeColors = {
-        host_service: '#3b82f6',
-        service_dependency: '#f97316',
-        service_database: '#ef4444',
-        default_gateway: '#eab308',
-        depends_on: '#8b5cf6',
-        dns_resolver: '#22c55e',
-        connected_to: '#64748b',
-        runs_on: '#ec4899',
+        host_service: '#3b82f6', service_dependency: '#f97316', service_database: '#ef4444',
+        default_gateway: '#eab308', depends_on: '#8b5cf6', dns_resolver: '#22c55e',
+        connected_to: '#64748b', runs_on: '#ec4899',
       };
       const edgeLabels = {
-        host_service: 'Serviço',
-        service_dependency: 'Dependência',
-        service_database: 'Database',
-        default_gateway: 'Gateway',
-        depends_on: 'Depende',
-        dns_resolver: 'DNS',
-        connected_to: 'Conectado',
-        runs_on: 'Roda em',
+        host_service: 'Serviço', service_dependency: 'Dependência', service_database: 'Database',
+        default_gateway: 'Gateway', depends_on: 'Depende', dns_resolver: 'DNS',
+        connected_to: 'Conectado', runs_on: 'Roda em',
       };
-      function edgeColor(t) { return edgeColors[t] || '#64748b'; }
-      function edgeLabel(t) { return edgeLabels[t] || t.replace(/_/g, ' '); }
+      const edgeColor = t => edgeColors[t] || '#64748b';
+      const edgeLabel = t => edgeLabels[t] || t.replace(/_/g, ' ');
 
-      // Clone nodes with random initial positions in center area
+      // Nodes with random start positions
       const simNodes = graph.nodes.map(n => ({
         ...n, x: W/2 + (Math.random()-0.5)*200, y: H/2 + (Math.random()-0.5)*200,
       }));
       const nodeMap = {};
-      for (const n of simNodes) nodeMap[n.id] = n;
+      simNodes.forEach(n => { nodeMap[n.id] = n; });
 
       const simLinks = graph.links
         .map(l => ({ ...l, source: nodeMap[l.source], target: nodeMap[l.target] }))
@@ -1918,156 +2178,113 @@ const DISCOVERY_UI_HTML = `<!doctype html>
 
       if (simLinks.length === 0 || simNodes.length === 0) return;
 
-      // D3 simulation - stronger centering for large graphs, boundary forces
-      const nodeCount = simNodes.length;
-      const charge = nodeCount > 200 ? -200 : nodeCount > 100 ? -300 : -500;
-      const dist = nodeCount > 200 ? 80 : nodeCount > 100 ? 100 : 140;
-      const collideR = nodeCount > 200 ? 28 : nodeCount > 100 ? 32 : 40;
-
+      const N = simNodes.length;
       const sim = d3.forceSimulation(simNodes)
-        .force('link', d3.forceLink(simLinks).id(d => d.id).distance(dist))
-        .force('charge', d3.forceManyBody().strength(charge))
+        .force('link', d3.forceLink(simLinks).id(d => d.id).distance(N > 200 ? 80 : N > 100 ? 100 : 140))
+        .force('charge', d3.forceManyBody().strength(N > 200 ? -200 : N > 100 ? -300 : -500))
         .force('center', d3.forceCenter(W/2, H/2))
         .force('x', d3.forceX(W/2).strength(0.03))
         .force('y', d3.forceY(H/2).strength(0.03))
-        .force('collision', d3.forceCollide(collideR));
+        .force('collision', d3.forceCollide(N > 200 ? 28 : N > 100 ? 32 : 40));
 
-      // Build SVG groups
-      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-      svg.appendChild(g);
+      // Zoom behavior
+      const zoom = d3.zoom()
+        .scaleExtent([0.15, 5])
+        .on('zoom', (ev) => {
+          g.attr('transform', ev.transform);
+          setZoomLevel(Math.round(ev.transform.k * 100));
+        });
+      svg.call(zoom);
+      zoomRef.current = zoom;
+
+      // Root group for zoom transforms
+      const g = svg.append('g');
 
       // Arrow marker
-      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-      const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-      marker.setAttribute('id', 'arrow');
-      marker.setAttribute('viewBox', '0 0 10 10');
-      marker.setAttribute('refX', 24);
-      marker.setAttribute('refY', 5);
-      marker.setAttribute('markerWidth', 7);
-      marker.setAttribute('markerHeight', 7);
-      marker.setAttribute('orient', 'auto');
-      const mp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      mp.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
-      mp.setAttribute('fill', '#475569');
-      marker.appendChild(mp);
-      defs.appendChild(marker);
-      svg.appendChild(defs);
+      svg.append('defs').append('marker')
+        .attr('id', 'arrow').attr('viewBox', '0 0 10 10')
+        .attr('refX', 24).attr('refY', 5).attr('markerWidth', 7).attr('markerHeight', 7)
+        .attr('orient', 'auto')
+        .append('path').attr('d', 'M 0 0 L 10 5 L 0 10 z').attr('fill', '#475569');
 
-      // Link lines
-      const lineEls = simLinks.map(l => {
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('stroke', edgeColor(l.type));
-        line.setAttribute('stroke-width', 1.5);
-        line.setAttribute('stroke-opacity', 0.4);
-        line.setAttribute('marker-end', 'url(#arrow)');
-        return line;
-      });
-      const linkG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-      lineEls.forEach(el => linkG.appendChild(el));
-      g.appendChild(linkG);
+      // Links
+      const linkLines = g.selectAll('line')
+        .data(simLinks).join('line')
+        .attr('stroke', d => edgeColor(d.type))
+        .attr('stroke-width', 1.5).attr('stroke-opacity', 0.4)
+        .attr('marker-end', 'url(#arrow)');
+
+      // Link labels (small graphs only)
+      let linkLabels = null;
+      if (simLinks.length <= 40) {
+        linkLabels = g.selectAll('text.linklabel')
+          .data(simLinks).join('text')
+          .attr('class', 'linklabel')
+          .attr('fill', '#475569').attr('font-size', 8).attr('text-anchor', 'middle').attr('dy', -7)
+          .text(d => edgeLabel(d.type));
+      }
 
       // Node groups
-      const nodeGroups = simNodes.map(n => {
-        const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        group.setAttribute('cursor', n.type === 'asset' ? 'pointer' : 'default');
+      const nodeG = g.selectAll('g.node')
+        .data(simNodes).join('g')
+        .attr('class', 'node')
+        .attr('cursor', d => d.type === 'asset' ? 'pointer' : 'default');
 
-        const isAsset = n.type === 'asset';
+      nodeG.each(function(d) {
+        const el = d3.select(this);
+        const isAsset = d.type === 'asset';
         const r = isAsset ? 16 : 8;
-
-        // Circle
-        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        circle.setAttribute('r', r);
-        circle.setAttribute('fill', isAsset ? '#1e293b' : '#334155');
-        circle.setAttribute('stroke', isAsset ? '#3b82f6' : '#eab308');
-        circle.setAttribute('stroke-width', isAsset ? 2 : 1.2);
-        circle.setAttribute('stroke-opacity', isAsset ? 1 : 0.7);
-        group.appendChild(circle);
-
-        // Label - truncate long refs
-        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        label.setAttribute('fill', isAsset ? '#e2e8f0' : '#94a3b8');
-        label.setAttribute('font-size', isAsset ? '9' : '7');
-        label.setAttribute('text-anchor', 'middle');
-        label.setAttribute('dy', r + 12);
-        let short = n.label;
-        if (short.length > 20) short = short.substring(0, 18) + '..';
-        label.textContent = short;
-        group.appendChild(label);
-
-        // IP subtitle for assets
-        if (isAsset && n.ip) {
-          const ipT = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          ipT.setAttribute('fill', '#64748b');
-          ipT.setAttribute('font-size', '7');
-          ipT.setAttribute('text-anchor', 'middle');
-          ipT.setAttribute('dy', r + 23);
-          ipT.textContent = n.ip;
-          group.appendChild(ipT);
+        el.append('circle')
+          .attr('r', r)
+          .attr('fill', isAsset ? '#1e293b' : '#334155')
+          .attr('stroke', isAsset ? '#3b82f6' : '#eab308')
+          .attr('stroke-width', isAsset ? 2 : 1.2)
+          .attr('stroke-opacity', isAsset ? 1 : 0.7);
+        el.append('text')
+          .attr('fill', isAsset ? '#e2e8f0' : '#94a3b8')
+          .attr('font-size', isAsset ? 9 : 7).attr('text-anchor', 'middle').attr('dy', r + 12)
+          .text(d.label.length > 20 ? d.label.substring(0, 18) + '..' : d.label);
+        if (isAsset && d.ip) {
+          el.append('text')
+            .attr('fill', '#64748b').attr('font-size', 7).attr('text-anchor', 'middle').attr('dy', r + 23)
+            .text(d.ip);
         }
-
         if (isAsset) {
-          group.addEventListener('click', (ev) => {
+          el.on('click', (ev) => {
             ev.stopPropagation();
-            window.location.href = '/observe/assets/' + n.id;
+            setModal(d);
           });
         }
-
-        return group;
       });
-      nodeGroups.forEach(el => g.appendChild(el));
 
-      // Tick function with boundary clamping
+      // Tick with boundary clamping
       const margin = 40;
-      const tickFn = () => {
-        lineEls.forEach((line, i) => {
-          const l = simLinks[i];
-          if (!l.source || !l.target) return;
-          line.setAttribute('x1', l.source.x);
-          line.setAttribute('y1', l.source.y);
-          line.setAttribute('x2', l.target.x);
-          line.setAttribute('y2', l.target.y);
-        });
-        nodeGroups.forEach((grp, i) => {
-          const n = simNodes[i];
-          // Clamp within viewBox
+      sim.on('tick', () => {
+        simNodes.forEach(n => {
           const r = n.type === 'asset' ? 16 : 8;
           n.x = Math.max(margin + r, Math.min(W - margin - r, n.x));
           n.y = Math.max(margin + r, Math.min(H - margin - r, n.y));
-          grp.setAttribute('transform', 'translate(' + n.x + ',' + n.y + ')');
         });
-      };
-
-      // Link labels only for smaller graphs
-      if (simLinks.length <= 40) {
-        const linkLabelEls = simLinks.map(l => {
-          const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          t.setAttribute('fill', '#475569');
-          t.setAttribute('font-size', '8');
-          t.setAttribute('text-anchor', 'middle');
-          t.setAttribute('dy', -7);
-          t.textContent = edgeLabel(l.type);
-          return t;
-        });
-        const linkLG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        linkLabelEls.forEach(el => linkLG.appendChild(el));
-        g.appendChild(linkLG);
-        sim.on('tick', () => {
-          tickFn();
-          linkLabelEls.forEach((t, i) => {
-            const l = simLinks[i];
-            if (!l.source || !l.target) return;
-            t.setAttribute('x', (l.source.x + l.target.x) / 2);
-            t.setAttribute('y', (l.source.y + l.target.y) / 2);
-          });
-        });
-      } else {
-        sim.on('tick', tickFn);
-      }
+        linkLines
+          .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+        if (linkLabels) {
+          linkLabels
+            .attr('x', d => (d.source.x + d.target.x) / 2)
+            .attr('y', d => (d.source.y + d.target.y) / 2);
+        }
+        nodeG.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
+      });
 
       return () => sim.stop();
     }, [graph]);
 
-    // Build legend from actual edge types present
+    // Zoom controls
+    const zoomIn = () => { if (zoomRef.current) { const svg = d3.select(svgRef.current); svg.transition().duration(300).call(zoomRef.current.scaleBy, 1.4); } };
+    const zoomOut = () => { if (zoomRef.current) { const svg = d3.select(svgRef.current); svg.transition().duration(300).call(zoomRef.current.scaleBy, 0.7); } };
+    const zoomReset = () => { if (zoomRef.current) { const svg = d3.select(svgRef.current); svg.transition().duration(500).call(zoomRef.current.transform, d3.zoomIdentity); } };
+
+    // Legend
     const legendColors = {
       host_service: '#3b82f6', service_dependency: '#f97316', service_database: '#ef4444',
       default_gateway: '#eab308', depends_on: '#8b5cf6', dns_resolver: '#22c55e',
@@ -2078,15 +2295,55 @@ const DISCOVERY_UI_HTML = `<!doctype html>
       default_gateway: 'Gateway', depends_on: 'Depende', dns_resolver: 'DNS',
       connected_to: 'Conectado', runs_on: 'Roda em',
     };
-
     const usedTypes = new Set(graph.links.map(l => l.type));
     const legendEntries = [...usedTypes].filter(t => legendLabels[t]);
 
-    const legendEl = legendEntries.length > 0 ? e('div', { style:{ display:'flex', gap:12, flexWrap:'wrap', marginBottom:10, padding:'4px 0' } },
-      ...legendEntries.map(t =>
-        e('div', { key:t, style:{ display:'flex', alignItems:'center', gap:5, fontSize:'.72rem', color:'#8b949e' } },
-          e('span', { style:{ width:18, height:3, background:legendColors[t]||'#64748b', borderRadius:2, display:'inline-block' } }),
-          legendLabels[t] || t
+    // Modal
+    const modalEl = modal ? e('div', {
+      style:{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999 },
+      onClick: () => setModal(null)
+    },
+      e('div', {
+        style:{ background:'#1c2128', border:'1px solid #30363d', borderRadius:12, padding:'2rem', maxWidth:'500px', width:'90%', maxHeight:'80vh', overflow:'auto' },
+        onClick: ev => ev.stopPropagation()
+      },
+        e('div', { style:{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'1rem' } },
+          e('h3', { style:{ margin:0, fontSize:'1.1rem', color:'#e2e8f0' } }, modal.label),
+          e('button', {
+            onClick: () => setModal(null),
+            style:{ background:'transparent', border:'1px solid #30363d', borderRadius:6, color:'#8b949e', cursor:'pointer', padding:'4px 10px', fontSize:'.9rem' }
+          }, '✕')
+        ),
+        e('div', { style:{ display:'flex', flexDirection:'column', gap:8, fontSize:'.85rem' } },
+          e('div', { style:{ display:'flex', justifyContent:'space-between' } },
+            e('span', { style:{ color:'#8b949e' } }, 'IP'),
+            e('code', { style:{ color:'#58a6ff' } }, modal.ip || '—')
+          ),
+          modal.vendor ? e('div', { style:{ display:'flex', justifyContent:'space-between' } },
+            e('span', { style:{ color:'#8b949e' } }, 'Fabricante'),
+            e('span', null, modal.vendor)
+          ) : null,
+          modal.product ? e('div', { style:{ display:'flex', justifyContent:'space-between' } },
+            e('span', { style:{ color:'#8b949e' } }, 'Produto'),
+            e('span', null, modal.product)
+          ) : null,
+          modal.os_hint ? e('div', { style:{ display:'flex', justifyContent:'space-between' } },
+            e('span', { style:{ color:'#8b949e' } }, 'SO'),
+            e('span', null, modal.os_hint)
+          ) : null,
+          e('div', { style:{ display:'flex', justifyContent:'space-between' } },
+            e('span', { style:{ color:'#8b949e' } }, 'Estado'),
+            e('span', { className:'badge badge-'+modal.lifecycle_state }, modal.lifecycle_state||'descoberto')
+          )
+        ),
+        e('div', { style:{ display:'flex', gap:8, marginTop:'1.2rem' } },
+          e('a', { href:'/observe/assets/'+modal.id, target:'_blank',
+            style:{ background:'#CC1212', color:'#fff', padding:'6px 16px', borderRadius:6, textDecoration:'none', fontSize:'.82rem', fontWeight:600 }
+          }, 'Abrir página completa'),
+          e('button', {
+            onClick: () => setModal(null),
+            style:{ background:'transparent', border:'1px solid #30363d', borderRadius:6, color:'#8b949e', cursor:'pointer', padding:'6px 16px', fontSize:'.82rem' }
+          }, 'Fechar')
         )
       )
     ) : null;
@@ -2101,25 +2358,38 @@ const DISCOVERY_UI_HTML = `<!doctype html>
     }
 
     return e('div', null,
-      e('div', { style:{ display:'flex', alignItems:'center', gap:8, marginBottom:10, flexWrap:'wrap' } },
+      e('div', { style:{ display:'flex', alignItems:'center', gap:8, marginBottom:6, flexWrap:'wrap' } },
         e('h2', { style:{ fontSize:'1.1rem', margin:0, flex:1 } }, 'Topologia Operacional'),
-        e('span', { style:{ fontSize:'.78rem', color:'#64748b' } },
-          graph.nodes.length + ' nós  ·  ' + graph.links.length + ' arestas'
-        )
+        e('span', { style:{ fontSize:'.78rem', color:'#64748b' } }, graph.nodes.length + ' nós  ·  ' + graph.links.length + ' arestas'),
+        e('span', { style:{ fontSize:'.72rem', color:'#475569', marginLeft:4 } }, '|  ' + zoomLevel + '%'),
+        e('button', { onClick: zoomIn, title:'Zoom +',
+          style:{ background:'#1e293b', border:'1px solid #30363d', borderRadius:5, color:'#e2e8f0', cursor:'pointer', padding:'3px 8px', fontSize:'.85rem', fontWeight:'bold' }
+        }, '+'),
+        e('button', { onClick: zoomOut, title:'Zoom -',
+          style:{ background:'#1e293b', border:'1px solid #30363d', borderRadius:5, color:'#e2e8f0', cursor:'pointer', padding:'3px 8px', fontSize:'.85rem', fontWeight:'bold' }
+        }, '−'),
+        e('button', { onClick: zoomReset, title:'Reset zoom',
+          style:{ background:'#1e293b', border:'1px solid #30363d', borderRadius:5, color:'#8b949e', cursor:'pointer', padding:'3px 8px', fontSize:'.75rem' }
+        }, '↺')
       ),
-      legendEl,
-      e('div', { style:{ background:'#0d1117', border:'1px solid #30363d', borderRadius:10, overflow:'hidden' } },
+      legendEntries.length > 0 ? e('div', { style:{ display:'flex', gap:12, flexWrap:'wrap', marginBottom:6, padding:'2px 0' } },
+        ...legendEntries.map(t =>
+          e('div', { key:t, style:{ display:'flex', alignItems:'center', gap:5, fontSize:'.72rem', color:'#8b949e' } },
+            e('span', { style:{ width:18, height:3, background:legendColors[t]||'#64748b', borderRadius:2, display:'inline-block' } }), legendLabels[t] || t))
+      ) : null,
+      e('div', { style:{ background:'#0d1117', border:'1px solid #30363d', borderRadius:10, overflow:'hidden', position:'relative' } },
         e('svg', {
           ref: svgRef,
-          style:{ width:'100%', height:'760px', display:'block' },
+          style:{ width:'100%', height:'760px', display:'block', cursor:'grab' },
           viewBox: '0 0 1000 760',
           preserveAspectRatio: 'xMidYMid meet'
         })
       ),
       e('div', { style:{ fontSize:'.7rem', color:'#475569', marginTop:6, textAlign:'center' } },
-        'Clique nos nós azuis para abrir o detalhe do ativo. ' +
-        (graph.links.length > 60 ? 'Labels de arestas ocultos para melhor legibilidade.' : '')
-      )
+        'Scroll para zoom  ·  Arraste para mover  ·  Clique nos nós azuis para detalhes  ·  ' +
+        (graph.links.length > 40 ? 'Labels ocultos (+40 arestas)' : graph.links.length + ' arestas visíveis')
+      ),
+      modalEl
     );
   }
 

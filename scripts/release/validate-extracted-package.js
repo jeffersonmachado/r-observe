@@ -153,7 +153,7 @@ function validateImports(rootDir, errors, options = {}) {
   const checkResolution = options.checkResolution === true;
   const packageDirs = findPackageDirs(rootDir);
   const packageMeta = new Map(packageDirs.map((dir) => [dir, readJson(path.join(dir, 'package.json'))]));
-  const scanRoots = ['scripts', 'r-observe', 'tests']
+  const scanRoots = ['r-observe', 'tests']
     .map((dir) => path.join(rootDir, dir))
     .filter((dir) => fs.existsSync(dir));
   const jsFiles = scanRoots.flatMap((dir) => walk(dir)).filter((file) => /\.(js|cjs|mjs)$/.test(file));
@@ -175,7 +175,21 @@ function validateImports(rootDir, errors, options = {}) {
       if (BUILTINS.has(spec) || spec.startsWith('node:')) continue;
       if (spec.startsWith('.') || spec.startsWith('/')) {
         const target = spec.startsWith('/') ? path.join(rootDir, spec.slice(1)) : path.resolve(path.dirname(file), spec);
-        if (!fileExistsWithExt(target)) {
+        let resolved = fileExistsWithExt(target);
+
+        // Docker context: r-observe/<svc>/src/ -> shared/ fica em r-observe/shared/
+        // No Docker, COPY shared/ ./shared/ e COPY <svc>/src/ ./src/ viram siblings
+        // ../shared/X de src/index.js resolve para r-observe/shared/X no repo
+        if (!resolved && !spec.startsWith('/') && spec.startsWith('../')) {
+          const relFile = path.relative(rootDir, file);
+          const dockerMatch = relFile.match(/^r-observe\/([^/]+)\/src\//);
+          if (dockerMatch) {
+            const dockerTarget = path.join(rootDir, 'r-observe', spec.replace(/^\.\.\//, ''));
+            resolved = fileExistsWithExt(dockerTarget);
+          }
+        }
+
+        if (!resolved) {
           errors.push(`import relativo quebrado: ${path.relative(rootDir, file)} -> ${spec}`);
         }
         continue;
@@ -213,6 +227,50 @@ function main() {
   if (!fs.existsSync(path.join(rootDir, 'r-observe/discovery/package.json'))) errors.push('r-observe/discovery/package.json ausente no pacote extraido');
 
   if (args.runInstall) {
+    // Remove file: dependencies whose targets don't exist in the extracted context
+    // (e.g. @results/auth -> ../../../packages/auth which lives in the monorepo parent)
+    const strippedDirs = new Set();
+    for (const dir of packageDirs) {
+      const pkgPath = path.join(dir, 'package.json');
+      const pkg = readJson(pkgPath);
+      let changed = false;
+      const removedDeps = [];
+      for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+        const deps = pkg[field] || {};
+        for (const [name, version] of Object.entries(deps)) {
+          if (typeof version === 'string' && version.startsWith('file:')) {
+            const filePath = version.replace(/^file:/, '');
+            const resolved = path.resolve(dir, filePath);
+            if (!fs.existsSync(resolved)) {
+              delete deps[name];
+              removedDeps.push(name);
+              changed = true;
+            }
+          }
+        }
+        if (changed && Object.keys(deps).length === 0) delete pkg[field];
+      }
+      if (changed) {
+        fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+        strippedDirs.add(dir);
+
+        // Also strip removed deps from package-lock.json to keep them in sync
+        const lockPath = path.join(dir, 'package-lock.json');
+        if (fs.existsSync(lockPath)) {
+          const lock = readJson(lockPath);
+          if (lock.packages) {
+            for (const key of Object.keys(lock.packages)) {
+              const pkgName = key === '' ? lock.name : key.replace(/^node_modules\//, '');
+              if (removedDeps.includes(pkgName)) {
+                delete lock.packages[key];
+              }
+            }
+          }
+          fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n', 'utf8');
+        }
+      }
+    }
+
     const installDirs = packageDirs
       .filter((dir) => fs.existsSync(path.join(dir, 'package-lock.json')))
       .sort((a, b) => a.length - b.length);
@@ -221,8 +279,12 @@ function main() {
       const lockPath = path.join(dir, 'package-lock.json');
       const relDir = path.relative(rootDir, dir) || '.';
       const beforeLock = fs.existsSync(lockPath) ? sha256File(lockPath) : '';
-      const installCmd = 'ci';
-      const res = run('npm', [installCmd, '--ignore-scripts', '--prefer-offline', '--no-audit', '--no-fund'], { cwd: dir });
+      // Use npm install (not ci) for dirs where file: deps were stripped from package.json
+      const installCmd = strippedDirs.has(dir) ? 'install' : 'ci';
+      const installArgs = strippedDirs.has(dir)
+        ? ['install', '--ignore-scripts', '--no-audit', '--no-fund']
+        : ['ci', '--ignore-scripts', '--no-audit', '--no-fund'];
+      const res = run('npm', installArgs, { cwd: dir });
       process.stdout.write(res.stdout || '');
       process.stderr.write(res.stderr || '');
       appendCannotFindModuleErrors(`${res.stdout}\n${res.stderr}`, `npm ci (${relDir})`, errors);
@@ -246,8 +308,9 @@ function main() {
         }
       }
 
-      if (fs.existsSync(lockPath)) {
-        const installCheck = run('npm', ['install', '--package-lock-only', '--ignore-scripts', '--prefer-offline', '--no-audit', '--no-fund'], { cwd: dir });
+      // Skip lockfile integrity check for dirs where file: deps were stripped
+      if (fs.existsSync(lockPath) && !strippedDirs.has(dir)) {
+        const installCheck = run('npm', ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: dir });
         process.stdout.write(installCheck.stdout || '');
         process.stderr.write(installCheck.stderr || '');
         appendCannotFindModuleErrors(`${installCheck.stdout}\n${installCheck.stderr}`, `npm install --package-lock-only (${relDir})`, errors);

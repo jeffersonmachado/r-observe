@@ -3,9 +3,20 @@
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { requireJwt } = require('./jwt');
+const { requireJwt, requireScope } = require('@results/auth');
 
 const { createLifecycle } = require('../shared/lifecycle');
+
+// ─── AIOps Engine ──────────────────────────────────────────────────────────
+const { analyzeRootCause } = require('./root-cause-engine');
+const { deduplicateAlerts, clusterEvents, detectPatterns, correlationScore } = require('./correlation-engine');
+const { IncidentStore, findSimilarIncidents } = require('./incident-memory');
+const { findPlaybooks, FeedbackLoop } = require('./knowledge-base');
+
+// ─── AIOps State ───────────────────────────────────────────────────────────
+const incidentStore = new IncidentStore({ maxSize: 5000 });
+const feedbackLoop = new FeedbackLoop();
+let aiAnalysesCount = 0;
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT           = parseInt(process.env.PORT || '3000', 10);
@@ -462,7 +473,14 @@ app.get('/health', (_req, res) => {
 
 app.get('/metrics', (_req, res) => {
   res.set('Content-Type', 'text/plain');
-  res.end('# R-Observe AI metrics\n');
+  res.end([
+    '# HELP r_observe_ai_analyses_total Total AI analyses performed',
+    '# TYPE r_observe_ai_analyses_total counter',
+    `r_observe_ai_analyses_total ${aiAnalysesCount}`,
+    `# HELP r_observe_ai_incidents_stored Total incidents in memory`,
+    '# TYPE r_observe_ai_incidents_stored gauge',
+    `r_observe_ai_incidents_stored ${incidentStore.getStats().total}`,
+  ].join('\n') + '\n');
 });
 
 // GET /ai/settings — config atual (sem expor a chave)
@@ -486,7 +504,7 @@ app.get('/ai/models', requireAuth, async (req, res) => {
 });
 
 // POST /ai/settings — atualiza provider/model/api_key em runtime
-app.post('/ai/settings', requireAuth, (req, res) => {
+app.post('/ai/settings', requireAuth, requireScope('ai:settings:write'), (req, res) => {
   const { provider, model, api_key } = req.body;
 
   if (provider !== undefined) {
@@ -519,6 +537,7 @@ app.post('/ai/settings', requireAuth, (req, res) => {
 
 // POST /ai/explain
 app.post('/ai/explain', requireAuth, limiter, async (req, res) => {
+  aiAnalysesCount++;
   const { incident, context } = req.body;
   if (!incident) return res.status(400).json({ error: 'incident é obrigatório' });
   try {
@@ -666,6 +685,189 @@ async function fingerprintDevice(signals) {
     return { summary: raw.slice(0, 300), provider: runtimeConfig.provider, model: effectiveModel };
   }
 }
+
+// ─── AIOps Endpoints ──────────────────────────────────────────────────────
+
+// POST /ai/rca — Root Cause Analysis
+app.post('/ai/rca', requireAuth, limiter, async (req, res) => {
+  const { incident, topology, recent_events, similar_incidents } = req.body;
+  if (!incident) return res.status(400).json({ error: 'incident é obrigatório' });
+  try {
+    const result = analyzeRootCause(incident, {
+      topology: topology || [],
+      recent_events: recent_events || [],
+      similar_incidents: similar_incidents || [],
+    });
+
+    // Store in incident memory for future similarity searches
+    incidentStore.add({
+      id: incident.id,
+      title: incident.title,
+      severity: incident.severity,
+      status: incident.status,
+      source: incident.source,
+      check_type: incident.check_type,
+      target_type: incident.target_type,
+      target_name: incident.target_name,
+      target_id: incident.target_id,
+      host_name: incident.host_name,
+      description: incident.description,
+      ai_summary: result.best_hypothesis?.cause || null,
+      created_at: incident.timestamp || incident.created_at || new Date().toISOString(),
+      resolved_cause: null,
+    });
+
+    res.json(result);
+  } catch (e) {
+    log('error', 'RCA failed', { err: e.message });
+    res.status(500).json({ error: 'RCA analysis failed', detail: e.message });
+  }
+});
+
+// POST /ai/correlate — Event Correlation
+app.post('/ai/correlate', requireAuth, limiter, async (req, res) => {
+  const { events, mode } = req.body;
+  if (!Array.isArray(events)) return res.status(400).json({ error: 'events deve ser um array' });
+  try {
+    let result;
+
+    switch (mode) {
+      case 'dedup': {
+        const dedupResult = deduplicateAlerts(events);
+        result = { ...dedupResult, mode: 'dedup' };
+        break;
+      }
+      case 'cluster': {
+        const clusters = clusterEvents(events);
+        result = { clusters, total_clusters: clusters.length, mode: 'cluster' };
+        break;
+      }
+      case 'patterns': {
+        const patterns = detectPatterns(events);
+        result = { patterns, total_patterns: patterns.length, mode: 'patterns' };
+        break;
+      }
+      default: {
+        // Full correlation: dedup + cluster + patterns
+        const dedupResult = deduplicateAlerts(events);
+        const clusters = clusterEvents(events);
+        const patterns = detectPatterns(events);
+        result = {
+          dedup: { unique_count: dedupResult.unique_count, dedup_count: dedupResult.dedup_count },
+          clusters: clusters.slice(0, 10),
+          total_clusters: clusters.length,
+          patterns,
+          total_patterns: patterns.length,
+          mode: 'full',
+        };
+      }
+    }
+
+    res.json(result);
+  } catch (e) {
+    log('error', 'Correlation failed', { err: e.message });
+    res.status(500).json({ error: 'Correlation failed', detail: e.message });
+  }
+});
+
+// POST /ai/similar-incidents — Find similar incidents
+app.post('/ai/similar-incidents', requireAuth, limiter, async (req, res) => {
+  const { incident, min_similarity, max_results } = req.body;
+  if (!incident) return res.status(400).json({ error: 'incident é obrigatório' });
+  try {
+    const results = incidentStore.search(incident, {
+      minSimilarity: min_similarity || 0.3,
+      maxResults: max_results || 10,
+    });
+
+    res.json({
+      similar_incidents: results,
+      total: results.length,
+      searched_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    log('error', 'Similar incident search failed', { err: e.message });
+    res.status(500).json({ error: 'Search failed', detail: e.message });
+  }
+});
+
+// GET /ai/playbooks — Search knowledge base playbooks
+app.get('/ai/playbooks', requireAuth, async (req, res) => {
+  const { check_type, severity, target_type, source, status } = req.query;
+  const incident = {
+    check_type: check_type || null,
+    severity: severity || null,
+    target_type: target_type || null,
+    source: source || null,
+    status: status || null,
+  };
+
+  try {
+    const results = findPlaybooks(incident);
+    res.json({
+      playbooks: results.map(r => ({
+        id: r.playbook.id,
+        title: r.playbook.title,
+        relevance: r.relevance,
+        risk: r.playbook.risk,
+        auto_ok: r.playbook.auto_ok,
+        estimated_time_minutes: r.playbook.estimated_time_minutes,
+        steps: r.playbook.steps,
+      })),
+      total: results.length,
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Playbook search failed', detail: e.message });
+  }
+});
+
+// POST /ai/feedback — Record feedback on remediation
+app.post('/ai/feedback', requireAuth, limiter, async (req, res) => {
+  const { incident_id, remediation_id, rating, comment } = req.body;
+  if (!incident_id || !remediation_id || rating === undefined) {
+    return res.status(400).json({ error: 'incident_id, remediation_id e rating são obrigatórios' });
+  }
+  try {
+    feedbackLoop.record(incident_id, remediation_id, parseInt(rating), comment || null);
+
+    // Update incident memory with resolution
+    const incident = incidentStore.get(incident_id);
+    if (incident) {
+      incident.resolved_cause = comment || `Resolved via ${remediation_id} (rating: ${rating})`;
+    }
+
+    res.json({
+      ok: true,
+      stats: feedbackLoop.getStats(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Feedback recording failed', detail: e.message });
+  }
+});
+
+// GET /ai/feedback/stats — Feedback statistics
+app.get('/ai/feedback/stats', requireAuth, async (req, res) => {
+  try {
+    const remediationId = req.query.remediation_id || null;
+    if (remediationId) {
+      const effectiveness = feedbackLoop.getEffectiveness(remediationId);
+      res.json({ remediation_id: remediationId, effectiveness });
+    } else {
+      res.json(feedbackLoop.getStats());
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Stats retrieval failed', detail: e.message });
+  }
+});
+
+// GET /ai/incidents/stats — Incident store statistics
+app.get('/ai/incidents/stats', requireAuth, async (_req, res) => {
+  try {
+    res.json(incidentStore.getStats());
+  } catch (e) {
+    res.status(500).json({ error: 'Stats retrieval failed', detail: e.message });
+  }
+});
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 

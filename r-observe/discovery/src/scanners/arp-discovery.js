@@ -1,14 +1,15 @@
 'use strict';
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
+const fs = require('fs');
 const { log } = require('../utils/logger');
 const { isValidIPv4 } = require('./target-expansion');
 const { normalizeMac, analyzeMacType, vendorReliability } = require('../utils/mac-utils');
 const { lookupMacVendor } = require('../fingerprint/oui');
 const { debug, debugTable, isDebug } = require('../utils/logger');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Vendor OUI (Organizationally Unique Identifier) database
 // First 3 octets of MAC address → Vendor name
@@ -126,18 +127,33 @@ function parseProcNetArp(output) {
   return entries;
 }
 
-async function hasCommand(cmd, execFn = execAsync) {
+const COMMAND_PATHS = {
+  'arp-scan': ['/usr/bin/arp-scan', '/usr/sbin/arp-scan'],
+  ip: ['/sbin/ip', '/usr/sbin/ip', '/usr/bin/ip'],
+  arp: ['/sbin/arp', '/usr/sbin/arp', '/usr/bin/arp'],
+};
+
+async function hasCommand(cmd) {
+  if (!Object.hasOwn(COMMAND_PATHS, cmd)) return false;
   try {
-    await execFn(`command -v ${cmd}`);
-    return true;
+    for (const path of COMMAND_PATHS[cmd]) {
+      try {
+        await fs.promises.access(path, fs.constants.X_OK);
+        return path;
+      } catch (_) {}
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
-async function safeExec(command, execFn = execAsync) {
+async function safeExec(file, args = [], execFn = null) {
   try {
-    const { stdout } = await execFn(command);
+    const result = execFn
+      ? await execFn(file, args)
+      : await execFileAsync(file, args, { timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+    const { stdout } = result;
     return { ok: true, stdout: stdout || '' };
   } catch (e) {
     return { ok: false, stdout: e?.stdout || '', stderr: e?.stderr || e?.message || '' };
@@ -191,38 +207,36 @@ function buildMacMetadata(mac, vendor) {
  * - root/sudo privileges on some systems
  */
 async function discoverArpTable(options = {}) {
-  const execFn = options.execFn || execAsync;
+  const execFn = options.execFn || null;
   const assets = [];
 
   try {
     // Try to use arp-scan if available
     if (!options.disableArpScan) {
-      const arpScanAvailable = await hasCommand('arp-scan', execFn);
+      const arpScanAvailable = await hasCommand('arp-scan');
       if (arpScanAvailable) {
-        const scanned = await discoverArpScan(null, { execFn });
+        const scanned = await discoverArpScan(null, { execFn, commandPath: arpScanAvailable });
         if (scanned.length) return scanned;
       }
     }
 
     // Deterministic fallback chain
     const fallbackCommands = [
-      { cmd: 'ip neigh show', parser: parseArpTable, source: 'ip_neigh' },
-      { cmd: 'arp -an', parser: parseArpTable, source: 'arp_an' },
-      { cmd: 'arp -a', parser: parseArpTable, source: 'arp_a' },
-      { cmd: 'cat /proc/net/arp', parser: parseProcNetArp, source: 'proc_net_arp' },
-      // Host ARP table (montado via volume: /proc/net/arp:/host-arp:ro)
-      { cmd: 'cat /host-arp 2>/dev/null', parser: parseProcNetArp, source: 'host_proc_net_arp' },
+      { file: await hasCommand('ip'), args: ['neigh', 'show'], parser: parseArpTable, source: 'ip_neigh' },
+      { file: await hasCommand('arp'), args: ['-an'], parser: parseArpTable, source: 'arp_an' },
+      { file: await hasCommand('arp'), args: ['-a'], parser: parseArpTable, source: 'arp_a' },
     ];
 
     let entries = [];
     let source = 'none';
     let permissionRestricted = false;
     for (const item of fallbackCommands) {
-      const out = await safeExec(item.cmd, execFn);
+      if (!item.file) continue;
+      const out = await safeExec(item.file, item.args, execFn);
       if (!out.ok) {
         if (/permission denied|operation not permitted/i.test(out.stderr || '')) {
           permissionRestricted = true;
-          log('warn', 'ARP command permission denied', { command: item.cmd, error: out.stderr });
+          log('warn', 'ARP command permission denied', { command: item.source, error: out.stderr });
         }
         continue;
       }
@@ -230,6 +244,20 @@ async function discoverArpTable(options = {}) {
       if (entries.length) {
         source = item.source;
         break;
+      }
+    }
+
+    if (!entries.length) {
+      for (const item of [
+        { path: '/proc/net/arp', source: 'proc_net_arp' },
+        { path: '/host-arp', source: 'host_proc_net_arp' },
+      ]) {
+        try {
+          entries = parseProcNetArp(await fs.promises.readFile(item.path, 'utf8'));
+          if (entries.length) { source = item.source; break; }
+        } catch (e) {
+          if (e.code === 'EACCES') permissionRestricted = true;
+        }
       }
     }
     
@@ -281,12 +309,17 @@ async function discoverArpTable(options = {}) {
  * Scans a subnet and identifies active devices.
  */
 async function discoverArpScan(subnet = null, options = {}) {
-  const execFn = options.execFn || execAsync;
+  const execFn = options.execFn || null;
   const assets = [];
 
   try {
-    const cmd = subnet ? `arp-scan ${subnet}` : 'arp-scan -l';
-    const { stdout } = await execFn(cmd);
+    if (subnet && !isValidSubnet(subnet)) return [];
+    const file = options.commandPath || await hasCommand('arp-scan');
+    if (!file) return [];
+    const args = subnet ? [subnet] : ['-l'];
+    const { stdout } = execFn
+      ? await execFn(file, args)
+      : await execFileAsync(file, args, { timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
 
     const lines = stdout.split('\n');
     
@@ -335,6 +368,12 @@ async function discoverArpScan(subnet = null, options = {}) {
   }
 
   return assets;
+}
+
+function isValidSubnet(value) {
+  const [ip, mask, extra] = String(value || '').split('/');
+  const prefix = Number(mask);
+  return extra === undefined && isValidIPv4(ip) && Number.isInteger(prefix) && prefix >= 8 && prefix <= 32;
 }
 
 /**
@@ -397,5 +436,6 @@ module.exports = {
   classifyArpDevice,
   enrichArpAssets,
   hasCommand,
+  isValidSubnet,
   OUI_VENDORS,
 };

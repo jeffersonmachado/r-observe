@@ -37,39 +37,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ── Decide se executa local ou via SSH ────────────────────────────────────────
+# Todo destino remoto usa artefatos construidos localmente.
 if [[ -n "${REMOTE_HOST}" ]]; then
-  if [[ -n "${SSH_PASSWORD}" ]]; then
-    command -v sshpass >/dev/null 2>&1 || die "sshpass nao encontrado. Instale ou configure chave SSH para deploy remoto."
-    run() { sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no "root@${REMOTE_HOST}" "cd /opt/results/infra && $*"; }
-    rsync_remote() {
-      sshpass -p "${SSH_PASSWORD}" rsync -az --delete \
-        --exclude='.env*' \
-        --exclude='node_modules' \
-        --exclude='.git' \
-        -e "ssh -o StrictHostKeyChecking=no" \
-        "${REPO_ROOT}/" "root@${REMOTE_HOST}:/opt/results/infra/"
-    }
-  else
-    run() { ssh -o StrictHostKeyChecking=no "root@${REMOTE_HOST}" "cd /opt/results/infra && $*"; }
-    rsync_remote() {
-      rsync -az --delete \
-        --exclude='.env*' \
-        --exclude='node_modules' \
-        --exclude='.git' \
-        "${REPO_ROOT}/" "root@${REMOTE_HOST}:/opt/results/infra/"
-    }
-  fi
-  run_local() { "$@"; }
-  DEPLOY_TARGET="${REMOTE_HOST}"
-  step "Sincronizando repositório em ${REMOTE_HOST}..."
-  rsync_remote
-  ok "Repositório sincronizado"
-else
-  run() { (cd "${REPO_ROOT}" && eval "$*"); }
-  run_local() { "$@"; }
-  DEPLOY_TARGET="local"
+  remote_args=(--host "$REMOTE_HOST")
+  [[ "$SKIP_SMOKE" == true ]] && remote_args+=(--skip-smoke)
+  exec bash "${SCRIPT_DIR}/deploy-local-images.sh" "${remote_args[@]}"
 fi
+
+# ── Fluxo local ───────────────────────────────────────────────────────────────
+run() { (cd "${REPO_ROOT}" && eval "$*"); }
+run_local() { "$@"; }
+DEPLOY_TARGET="local"
 
 echo -e "${BOLD}── R-Observe Deploy ── target: ${DEPLOY_TARGET} ──────────────────${RESET}"
 
@@ -79,11 +57,7 @@ step "Verificando pré-condições..."
 # .env.observe obrigatório
 if ! run "test -f .env.observe"; then
   warn ".env.observe não encontrado."
-  if [[ -n "${REMOTE_HOST}" ]]; then
-    die "Crie .env.observe no servidor a partir de .env.observe.example antes de continuar."
-  else
-    die "Execute: cp .env.observe.example .env.observe && edite as senhas."
-  fi
+  die "Execute: cp .env.observe.example .env.observe && edite as senhas."
 fi
 ok ".env.observe presente"
 
@@ -99,7 +73,7 @@ ok "Build concluído"
 
 # ── Subida da stack ───────────────────────────────────────────────────────────
 step "Iniciando stack (todos os profiles)..."
-run "docker compose -f docker-compose.observe.yml --env-file .env.observe \
+run "COMPOSE_PARALLEL_LIMIT=1 docker compose -f docker-compose.observe.yml --env-file .env.observe \
   --profile observe-core \
   --profile observe-ai \
   --profile observe-agent \
@@ -158,27 +132,15 @@ if [[ "${SKIP_DISCOVER}" == "false" ]]; then
   DISCOVER_ARGS=""
   [[ -n "${SUBNET}" ]] && DISCOVER_ARGS="--subnet ${SUBNET}"
 
-  if [[ -n "${REMOTE_HOST}" ]]; then
-    run "bash scripts/observe/discover-hosts.sh ${DISCOVER_ARGS}" || \
-      warn "Descoberta falhou — execute manualmente: npm run observe:discover"
-  else
-    bash "${SCRIPT_DIR}/discover-hosts.sh" ${DISCOVER_ARGS} || \
-      warn "Descoberta falhou — execute manualmente: npm run observe:discover"
-  fi
+  bash "${SCRIPT_DIR}/discover-hosts.sh" ${DISCOVER_ARGS} || \
+    warn "Descoberta falhou — execute manualmente: npm run observe:discover"
 fi
 
 # ── Smoke tests ───────────────────────────────────────────────────────────────
 if [[ "${SKIP_SMOKE}" == "false" ]]; then
   step "Executando smoke tests..."
-  if [[ -n "${REMOTE_HOST}" ]]; then
-    run "bash scripts/observe/smoke-observe-stack.sh" && \
-      ok "Smoke test geral passou" || warn "Smoke test geral falhou"
-    run "bash scripts/observe/smoke-icinga.sh" && \
-      ok "Smoke test Icinga passou" || warn "Smoke test Icinga falhou"
-  else
-    bash "${SCRIPT_DIR}/smoke-observe-stack.sh" && ok "Smoke test geral passou" || warn "Smoke test geral falhou"
-    bash "${SCRIPT_DIR}/smoke-icinga.sh"        && ok "Smoke test Icinga passou" || warn "Smoke test Icinga falhou"
-  fi
+  bash "${SCRIPT_DIR}/smoke-observe-stack.sh" && ok "Smoke test geral passou" || warn "Smoke test geral falhou"
+  bash "${SCRIPT_DIR}/smoke-icinga.sh"        && ok "Smoke test Icinga passou" || warn "Smoke test Icinga falhou"
 fi
 
 # ── Resumo ────────────────────────────────────────────────────────────────────
@@ -187,12 +149,11 @@ echo -e "${BOLD}─────────────────────�
 echo -e "${GREEN}${BOLD}Deploy concluído!${RESET}"
 
 HTTP_PORT=$(run "grep OBSERVE_HTTP_PORT .env.observe 2>/dev/null | cut -d= -f2" 2>/dev/null || echo "3080")
-TARGET_IP="${REMOTE_HOST:-localhost}"
 
 echo ""
-echo -e "  ${CYAN}Painel R-Observe:${RESET}  http://${TARGET_IP}:${HTTP_PORT}/observe/api/health"
-echo -e "  ${CYAN}IcingaWeb2:${RESET}        http://${TARGET_IP}:${HTTP_PORT}/icinga/"
-echo -e "  ${CYAN}Grafana:${RESET}           http://${TARGET_IP}:${HTTP_PORT}/grafana/"
+echo -e "  ${CYAN}Painel R-Observe:${RESET}  http://localhost:${HTTP_PORT}/observe/api/health"
+echo -e "  ${CYAN}IcingaWeb2:${RESET}        http://localhost:${HTTP_PORT}/icinga/"
+echo -e "  ${CYAN}Grafana:${RESET}           http://localhost:${HTTP_PORT}/grafana/"
 echo ""
 echo -e "  Logs:    docker compose -f docker-compose.observe.yml logs -f --tail=50"
 echo -e "  Status:  docker compose -f docker-compose.observe.yml ps"

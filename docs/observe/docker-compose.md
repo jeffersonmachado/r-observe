@@ -8,7 +8,7 @@
 
 | Profile              | Serviços incluídos                                          |
 |----------------------|-------------------------------------------------------------|
-| `observe-core`       | postgres, redis, r-observe-api, r-observe-worker, r-observe-discovery |
+| `observe-core`       | postgres, redis, db-bootstrap (one-shot), r-observe-api, r-observe-worker, r-observe-discovery |
 | `observe-ai`         | r-observe-ai                                                |
 | `observe-agent`      | r-observe-agent                                             |
 | `observe-icinga`     | icinga-redis, icinga2, icingadb, icingaweb2                |

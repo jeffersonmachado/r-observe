@@ -12,6 +12,7 @@
  */
 
 const { isValidIPv4 } = require('./scanners/target-expansion');
+const net = require('net');
 
 // Redes bloqueadas por padrao (loopback, link-local, multicast)
 // Redes privadas (10.x, 172.16-31.x, 192.168.x) sao controladas pela politica (allowed_ranges/blocked_ranges)
@@ -145,6 +146,22 @@ function validateTargetEntry(target, index) {
   return errors;
 }
 
+function isValidHost(value) {
+  const host = String(value || '').trim();
+  if (!host || host.length > 253) return false;
+  if (net.isIP(host)) return true;
+  if (host.endsWith('.') || host.includes('..')) return false;
+  return host.split('.').every((label) =>
+    label.length > 0 && label.length <= 63 &&
+    /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(label)
+  );
+}
+
+function isValidPort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 /**
  * Valida lista de targets.
  */
@@ -202,4 +219,6 @@ module.exports = {
   validateExpansionSize,
   MAX_HOSTS_HARD_LIMIT,
   DEFAULT_BLOCKED_PREFIXES,
+  isValidHost,
+  isValidPort,
 };

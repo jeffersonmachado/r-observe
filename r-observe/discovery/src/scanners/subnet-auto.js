@@ -7,13 +7,13 @@
 // 3. Vizinhos ARP existentes (agrupamento por prefixo)
 // 4. SNMP CDP/LLDP neighbors de switches gerenciados
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const os = require('os');
 const { log } = require('../utils/logger');
 const { isValidIPv4 } = require('./target-expansion');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Extrai subnets das interfaces de rede locais.
 async function discoverLocalSubnets() {
@@ -22,7 +22,7 @@ async function discoverLocalSubnets() {
 
   try {
     // Tenta ip addr primeiro (Linux moderno)
-    const { stdout } = await execAsync('ip -o -4 addr show', { timeout: 5000 });
+    const { stdout } = await execFileAsync('ip', ['-o', '-4', 'addr', 'show'], { timeout: 5000 });
     for (const line of stdout.split('\n')) {
       const m = line.match(/inet\s+(\d+\.\d+\.\d+\.\d+)\/(\d+)/);
       if (!m) continue;
@@ -78,7 +78,7 @@ async function discoverRouteSubnets() {
   const seen = new Set();
 
   try {
-    const { stdout } = await execAsync('ip -4 route show', { timeout: 5000 });
+    const { stdout } = await execFileAsync('ip', ['-4', 'route', 'show'], { timeout: 5000 });
     for (const line of stdout.split('\n')) {
       const m = line.match(/(\d+\.\d+\.\d+\.\d+\/\d+)/);
       if (!m) continue;

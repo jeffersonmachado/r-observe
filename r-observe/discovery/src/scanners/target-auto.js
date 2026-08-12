@@ -12,7 +12,7 @@
 
 const os = require('os');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { log, info, debug, isDebug } = require('../utils/logger');
 
 /**
@@ -21,11 +21,12 @@ const { log, info, debug, isDebug } = require('../utils/logger');
  */
 function deriveDockerSubnets() {
   try {
-    const Docker = require('dockerode');
-    const docker = new Docker({ socketPath: '/var/run/docker.sock' });
-    // Síncrono: docker inspect network (via child_process para evitar dependência async)
-    const output = execSync('docker network inspect $(docker network ls -q) 2>/dev/null', {
+    const ids = execFileSync('docker', ['network', 'ls', '-q'], {
       encoding: 'utf8', timeout: 5000,
+    }).trim().split(/\s+/).filter(Boolean);
+    if (!ids.length) return [];
+    const output = execFileSync('docker', ['network', 'inspect', ...ids], {
+      encoding: 'utf8', timeout: 5000, maxBuffer: 8 * 1024 * 1024,
     });
     const networks = JSON.parse(output);
     const subnets = [];

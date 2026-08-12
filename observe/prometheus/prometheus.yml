@@ -1,6 +1,8 @@
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  # Intervalos globais reduzidos de 15s → 60s para diminuir CPU/memória.
+  # Alvos críticos (API/worker) mantêm 30s via job-specific scrape_interval.
+  scrape_interval: 60s
+  evaluation_interval: 60s
   external_labels:
     product: 'r-observe'
     environment: 'production'
@@ -13,6 +15,7 @@ scrape_configs:
   # R-Observe API
   - job_name: 'r-observe-api'
     metrics_path: '/observe/api/metrics'
+    scrape_interval: 30s
     static_configs:
       - targets: ['r-observe-api:3000']
         labels:
@@ -21,6 +24,7 @@ scrape_configs:
   # R-Observe Worker
   - job_name: 'r-observe-worker'
     metrics_path: '/metrics'
+    scrape_interval: 30s
     static_configs:
       - targets: ['r-observe-worker:3000']
         labels:
@@ -91,7 +95,7 @@ scrape_configs:
   - job_name: 'discovered-http-sd'
     http_sd_configs:
       - url: 'http://r-observe-api:3000/observe/api/sd/targets'
-        refresh_interval: 30s
+        refresh_interval: 60s
     relabel_configs:
       # Mantém apenas targets com porta de exporter reconhecida
       - source_labels: [__address__]
@@ -104,7 +108,7 @@ scrape_configs:
   - job_name: 'discovery-engine-http-sd'
     http_sd_configs:
       - url: 'http://r-observe-discovery:3010/api/discovery/prometheus/http-sd'
-        refresh_interval: 30s
+        refresh_interval: 60s
     relabel_configs:
       - source_labels: [job]
         target_label: job
@@ -115,7 +119,7 @@ scrape_configs:
   - job_name: 'discovered-file-sd'
     file_sd_configs:
       - files: ['/etc/prometheus/sd/*.json']
-        refresh_interval: 60s
+        refresh_interval: 120s
     relabel_configs:
       - source_labels: [discovered]
         regex: 'true'
@@ -130,9 +134,12 @@ scrape_configs:
   - job_name: 'snmp-exporter'
     scrape_interval: 60s
     scrape_timeout: 30s
+    params:
+      auth: [public_v2]
+      module: [if_mib]
     file_sd_configs:
       - files: ['/etc/prometheus/sd/*.json']
-        refresh_interval: 120s
+        refresh_interval: 300s
     relabel_configs:
       - source_labels: [job]
         regex: 'snmp-exporter'
@@ -148,24 +155,3 @@ scrape_configs:
         target_label: interface_name
       - source_labels: [ifType]
         target_label: interface_type
-
-  # ── Exporters estáticos (sidecars na mesma rede Docker) ─────────────────
-  - job_name: 'redis-exporter-static'
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['r-observe-redis-exporter:9121']
-        labels:
-          service: 'redis'
-
-  - job_name: 'postgres-exporter-static'
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['r-observe-postgres-exporter:9187']
-        labels:
-          service: 'postgres'
-
-  - job_name: 'prometheus-self'
-    scrape_interval: 30s
-    metrics_path: /prometheus/metrics
-    static_configs:
-      - targets: ['localhost:9090']

@@ -6,7 +6,7 @@
   ```bash
   npm run observe:up
   ```
-- `.env.observe` configurado (especialmente `OBSERVE_INTERNAL_TOKEN`)
+- `.env.observe` configurado e keyring JWT gerado com `scripts/observe/jwt-keys.sh init`
 - `curl` e `docker` disponíveis no host
 
 ## Executar
@@ -16,6 +16,10 @@ npm run observe:smoke
 # ou
 ./scripts/observe/smoke-observe-stack.sh
 ```
+
+Por padrão, o script usa um host sintético exclusivo e remove ao final o
+incidente, timeline, remediação e host criados. Para preservar os dados durante
+um diagnóstico, execute com `--keep-data`.
 
 ## O que o smoke test valida
 
@@ -27,12 +31,12 @@ O script executa **10 steps sequenciais**:
 | 2    | Status dos serviços internos            | Redis e PostgreSQL respondendo            |
 | 3    | Envio de evento de teste                | POST `/observe/api/events` retorna 202    |
 | 4    | Worker processou o evento               | Incidente criado em `observe_incidents`   |
-| 5    | Incidente listado na API                | GET `/observe/api/incidents` retorna ≥1   |
-| 6    | Detalhe do incidente com timeline       | GET `/observe/api/incidents/:id`          |
-| 7    | Requisição de análise IA                | POST `/observe/api/ai/explain`            |
-| 8    | IA retornou campos esperados            | `summary`, `cause`, `suggestion` presentes|
-| 9    | Requisição de remediação                | POST `/observe/api/remediation/request`   |
-| 10   | Incidente pode ser encerrado            | Evento de resolução aceito                |
+| 5    | Análise de IA                            | `ai_summary` anexado ao incidente         |
+| 6    | Timeline                                 | Eventos persistidos em ordem              |
+| 7    | Persistência                             | Incidente consultável por ID              |
+| 8    | Estado                                   | Incidente inicialmente aberto             |
+| 9    | Sugestão de remediação                   | Pendente ou autoexecutada                 |
+| 10   | Aprovação                                | Remediação deixa a fila de pendência      |
 
 ## Resultado esperado
 
@@ -67,7 +71,7 @@ Consulte [troubleshooting.md](troubleshooting.md) para diagnóstico.
 ### Enviar evento
 
 ```bash
-TOKEN=$(grep OBSERVE_INTERNAL_TOKEN .env.observe | cut -d= -f2)
+TOKEN=$(JWT_SCOPE='api:access api:events:write' node scripts/observe/jwt-sign.js manual-smoke 5m)
 curl -sf -X POST http://localhost:3080/observe/api/events \
   -H "Content-Type: application/json" \
   -H "x-internal-token: $TOKEN" \

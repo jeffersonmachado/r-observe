@@ -15,9 +15,9 @@
  */
 
 const { promisify } = require('util');
-const { exec } = require('child_process');
-const execAsync = promisify(exec);
-const { snmpWalkParsed, snmpGet, snmpWalkIndexed, cleanSnmpValue, escapeShell } = require('../mibs/snmp-walk');
+const { execFile } = require('child_process');
+const execFileAsync = promisify(execFile);
+const { snmpWalkParsed, snmpGet, snmpWalkIndexed, cleanSnmpValue } = require('../mibs/snmp-walk');
 const { OIDS, resolveSysObjectID } = require('../mibs/snmp-oids');
 const { log } = require('../utils/logger');
 
@@ -375,10 +375,10 @@ async function snmpDeepDiscover(host, opts = {}) {
     // Resolve sysObjectID numericamente (snmpget -Oqv pode retornar MIB name)
     if (result.sysObjectID && !result.sysObjectID.startsWith('.')) {
       try {
-        const { stdout } = await execAsync(
-          `snmpget -v2c -c ${escapeShell(community)} -t 5 -r 1 -On ${escapeShell(host)} ${OIDS.system.sysObjectID}`,
-          { timeout: 10000 }
-        );
+        const { stdout } = await execFileAsync('snmpget', [
+          '-v2c', '-c', String(community), '-t', '5', '-r', '1', '-On',
+          host, OIDS.system.sysObjectID,
+        ], { timeout: 10000 });
         const match = stdout.match(/=\s*OID:\s*(\.\S+)/);
         if (match) result.sysObjectID = match[1];
       } catch (_) { /* mantém o valor original */ }

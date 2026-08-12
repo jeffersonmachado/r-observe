@@ -21,7 +21,7 @@ Todos os containers do stack de observabilidade usam o prefixo `r-observe-`:
 | `r-observe-grafana` | Grafana | 3000 |
 | `r-observe-prometheus` | Prometheus | 9090 |
 | `r-observe-loki` | Loki (logs) | 3100 |
-| `r-observe-promtail` | Promtail (coleta logs → Loki) | 9080 |
+| `r-observe-alloy` | Grafana Alloy (coleta logs → Loki) | 12345 |
 | `r-observe-otel-collector` | OpenTelemetry Collector | 4317, 4318 |
 
 ## Por que `r-observe-` e não `observe-`?

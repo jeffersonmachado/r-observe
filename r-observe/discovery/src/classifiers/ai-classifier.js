@@ -8,7 +8,7 @@
  */
 
 const { debug, log } = require('../utils/logger');
-const { signInternalToken } = require('../jwt');
+const { signInternalToken } = require('@results/auth');
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://r-observe-ai:3000';
 const AI_TIMEOUT_MS = parseInt(process.env.AI_CLASSIFY_TIMEOUT_MS || '4000', 10);
@@ -44,7 +44,7 @@ async function classifyService(ip, port, currentLabel, evidence = {}) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-internal-token': signInternalToken({ sub: 'r-observe-discovery', service: 'ai', role: 'admin' }),
+        'x-internal-token': signInternalToken({ sub: 'r-observe-discovery', service: 'discovery', role: 'operator', aud: 'ai', scope: ['ai:access'] }),
       },
       body: JSON.stringify({
         ip,

@@ -1,0 +1,85 @@
+discovery.docker "containers" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "60s"
+
+	filter {
+		name   = "label"
+		values = ["com.docker.compose.project=r-observe"]
+	}
+
+	filter {
+		name   = "status"
+		values = ["running"]
+	}
+}
+
+loki.process "containers" {
+	forward_to = [loki.write.default.receiver]
+
+	stage.docker { }
+
+	stage.drop {
+		drop_counter_reason = "entry_too_old"
+		older_than          = "1h0m0s"
+	}
+
+	stage.json {
+		expressions = {
+			service = "service",
+		}
+	}
+
+	stage.labels {
+		values = {
+			service = null,
+		}
+	}
+}
+
+discovery.relabel "container_labels" {
+	targets = []
+
+	rule {
+		target_label = "job"
+		replacement  = "containers"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "compose_project"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_image_name"]
+		target_label  = "image"
+	}
+}
+
+loki.source.docker "containers" {
+	host             = "unix:///var/run/docker.sock"
+	targets          = discovery.docker.containers.targets
+	forward_to       = [loki.process.containers.receiver]
+	relabel_rules    = discovery.relabel.container_labels.rules
+	refresh_interval = "60s"
+}
+
+loki.write "default" {
+	endpoint {
+		url        = "http://r-observe-loki:3100/loki/api/v1/push"
+		batch_size = "100KiB"
+	}
+	external_labels = {
+		source = "docker",
+	}
+}

@@ -19,6 +19,12 @@ const { discoverLldpCdp } = require('../scanners/lldp-cdp');
 const { handleAgentReport } = require('../scanners/agents');
 const { nmapServiceScan } = require('../scanners/nmap-sv');
 const { fingerprintAsset } = require('../fingerprint/engine');
+const { discoverVMware } = require('../scanners/vmware-vsphere');
+const { discoverProxmox } = require('../scanners/proxmox-ve');
+const { discoverHyperV } = require('../scanners/hyperv-windows');
+const { discoverVoip } = require('../scanners/voip-telephony');
+const { classifyInfrastructure } = require('../classifiers/infrastructure-classifier');
+const { classifyDatabase } = require('../classifiers/database-classifier');
 
 // ── Port change detection ─────────────────────────────────────────────────
 const PORT_CHANGE_ENABLED = process.env.DISCOVERY_PORT_CHANGE_DETECTION !== 'false';
@@ -170,25 +176,25 @@ async function storeAssetServices(db, asset, scan) {
 }
 
 // ── Port change detection (Gap #8 + #9) ──────────────────────────────────
-async function detectPortChanges(db, tenant, asset) {
+async function detectPortChanges(db, tenant, asset, previousServices = null) {
   if (!PORT_CHANGE_ENABLED) return [];
 
   try {
-    const prevResult = await db.query(
-      `SELECT service_key, service_name, port, protocol
+    const prevResult = previousServices ? null : await db.query(
+      `SELECT service_key, service_name, port, protocol, status, fingerprint
        FROM observe_asset_services
-       WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 AND asset_id = $4 AND status = 'open'`,
+       WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 AND asset_id = $4`,
       [tenant.tenant_id, tenant.site_id, tenant.edge_id, asset.id]
     );
-    const prevServices = prevResult.rows || [];
-    const prevKeys = new Set(prevServices.map(s => s.service_key));
+    const prevServices = previousServices || prevResult?.rows || [];
+    const prevOpenKeys = new Set(prevServices.filter(s => s.status === 'open').map(s => s.service_key));
     const currentKeys = new Set((asset.services || []).map(s => `${s.protocol || 'tcp'}:${s.port}`));
 
     const changes = [];
 
     for (const s of (asset.services || [])) {
       const key = `${s.protocol || 'tcp'}:${s.port}`;
-      if (!prevKeys.has(key)) {
+      if (!prevOpenKeys.has(key)) {
         changes.push({
           type: 'port_opened', severity: [22, 3389].includes(s.port) ? 'critical' : [3306, 5432, 6379, 27017].includes(s.port) ? 'warning' : 'info',
           source: 'port-change-detection', asset_key: asset.asset_key,
@@ -197,14 +203,10 @@ async function detectPortChanges(db, tenant, asset) {
       }
     }
 
-    for (const prev of prevServices) {
+    for (const prev of prevServices.filter(s => s.status === 'open' || s.status === 'closed')) {
       if (!currentKeys.has(prev.service_key)) {
-        const missResult = await db.query(
-          `SELECT COUNT(*) as missed FROM observe_asset_services
-           WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND asset_id=$4 AND service_key=$5 AND status='closed'`,
-          [tenant.tenant_id, tenant.site_id, tenant.edge_id, asset.id, prev.service_key]
-        );
-        const missed = parseInt(missResult.rows[0]?.missed || 0, 10);
+        const fingerprint = typeof prev.fingerprint === 'string' ? JSON.parse(prev.fingerprint || '{}') : (prev.fingerprint || {});
+        const missed = parseInt(fingerprint.missed_scans || 0, 10);
         if (missed >= PORT_DISAPPEARED_GRACE_SCANS - 1) {
           changes.push({
             type: 'port_closed', severity: [22, 80, 443, 3306, 5432, 6379, 9090].includes(prev.port) ? 'critical' : [25, 53, 161, 9100].includes(prev.port) ? 'warning' : 'info',
@@ -213,9 +215,10 @@ async function detectPortChanges(db, tenant, asset) {
           });
         }
         await db.query(
-          `UPDATE observe_asset_services SET status='closed', updated_at=NOW()
+          `UPDATE observe_asset_services SET status='closed',
+             fingerprint=COALESCE(fingerprint,'{}'::jsonb) || $6::jsonb, updated_at=NOW()
            WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND asset_id=$4 AND service_key=$5`,
-          [tenant.tenant_id, tenant.site_id, tenant.edge_id, asset.id, prev.service_key]
+          [tenant.tenant_id, tenant.site_id, tenant.edge_id, asset.id, prev.service_key, JSON.stringify({ missed_scans: missed + 1 })]
         );
       }
     }
@@ -239,11 +242,21 @@ async function persistDependencies(db, tenant, fromAssetId, services) {
 
     const type = depType || expType;
     if (!type) continue;
+    const metadata = { port: svc.port, protocol: svc.protocol };
+    const updated = await db.query(
+      `UPDATE observe_dependencies SET confidence=$6, metadata=$7, last_seen_at=NOW()
+       WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND upstream_asset_id=$4
+         AND downstream_asset_id IS NULL AND dependency_type=$5
+         AND metadata->>'port'=$8 AND metadata->>'protocol'=$9`,
+      [tenant.tenant_id, tenant.site_id, tenant.edge_id, fromAssetId, type, 0.7, JSON.stringify(metadata), String(svc.port), String(svc.protocol || '')]
+    );
+    if (updated.rowCount) continue;
     await db.query(
       `INSERT INTO observe_dependencies
         (id, tenant_id, site_id, edge_id, upstream_asset_id, downstream_asset_id, dependency_type, confidence, metadata, first_seen_at, last_seen_at)
-       VALUES (gen_random_uuid(),$1,$2,$3,$4,NULL,$5,$6,$7,NOW(),NOW())`,
-      [tenant.tenant_id, tenant.site_id, tenant.edge_id, fromAssetId, type, 0.7, JSON.stringify({ port: svc.port, protocol: svc.protocol })]
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,NULL,$5,$6,$7,NOW(),NOW())
+       ON CONFLICT DO NOTHING`,
+      [tenant.tenant_id, tenant.site_id, tenant.edge_id, fromAssetId, type, 0.7, JSON.stringify(metadata)]
     );
   }
 }
@@ -532,15 +545,16 @@ async function runDiscovery({ db, redis, input, onProgress }) {
         asset_key: 'system',
         payload: { canary_results: canaryResults, unreachable_pct: unreachablePct },
       });
-      await completeRun(db, run.id, 'failed', { error: `Canary: ${unreachableCount}/${canaryTargets.length} targets unreachable (${unreachablePct.toFixed(0)}%)` });
+      await completeRun(db, run.id, tenant, 'failed', { error: `Canary: ${unreachableCount}/${canaryTargets.length} targets unreachable (${unreachablePct.toFixed(0)}%)` });
       report({ stage: 'done', status: 'error', summary: { error: 'canary_abort', unreachable_pct: unreachablePct } });
-      return { scanned, assets, edges: [], sd: { total: 0 }, status: 'canary_abort' };
+      return { run_id: run.id, scanned, assets, edges: [], sd: { total: 0 }, status: 'canary_abort' };
     }
   }
 
   report({ stage: 'scanning', status: 'running', scanned: 0, discovered: 0, total_targets: expandedTargets.length });
 
   const scanResults = [];
+  let targetFailures = 0;
   const maxConc = Math.max(1, Math.min(50, policy.max_concurrency || 5));
   const throttlePerTargetMs = Math.floor(60000 / Math.max(1, policy.max_rate_per_minute || 300));
 
@@ -661,6 +675,15 @@ async function runDiscovery({ db, redis, input, onProgress }) {
 
     const drift = await detectDrift(db, run.id, row);
     const asset = await upsertAsset(db, row);
+    if (!asset) {
+      report({ stage: 'scanning', status: 'skipped', target: target.address, reason: 'network_or_broadcast_address' });
+      return null;
+    }
+    const previousServicesResult = await db.query(
+      `SELECT service_key, service_name, port, protocol, status, fingerprint
+       FROM observe_asset_services WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND asset_id=$4`,
+      [tenant.tenant_id, tenant.site_id, tenant.edge_id, asset.id]
+    );
     asset.services = await storeAssetServices(db, asset, scan);
 
     // ── OS-Driven monitoring: injeta exporters implícitos baseados no SO detectado ──
@@ -690,7 +713,7 @@ async function runDiscovery({ db, redis, input, onProgress }) {
     }
 
     // ── Detect port changes (opened/closed) ──
-    const portChanges = await detectPortChanges(db, tenant, asset);
+    const portChanges = await detectPortChanges(db, tenant, asset, previousServicesResult.rows || []);
     for (const change of portChanges) {
       await storeFinding(db, run.id, tenant, change);
       if (redis) {
@@ -763,7 +786,21 @@ async function runDiscovery({ db, redis, input, onProgress }) {
 
   for (const chunk_data of targetChunks) {
     for (const group of chunk(chunk_data, maxConc)) {
-      await Promise.all(group.map(processTarget));
+      await Promise.all(group.map(async (target) => {
+        try {
+          return await processTarget(target);
+        } catch (e) {
+          targetFailures++;
+          metrics.targetFailures.inc({ source: 'active-scan' });
+          const address = typeof target === 'string' ? target : target?.address;
+          log('warn', 'Discovery target failed', { address, err: e.message, run_id: run.id });
+          await saveFindings(db, run.id, tenant, {
+            type: 'target_scan_error', severity: 'error', source: 'active-scan',
+            asset_key: `ip:${address || 'unknown'}`, payload: { address, message: e.message },
+          }).catch(() => {});
+          return null;
+        }
+      }));
     }
     totalProcessed += chunk_data.length;
     report({ stage: 'scanning', status: 'running', scanned, discovered: assets.length, total_targets: expandedTargets.length, processed_chunks: Math.ceil(totalProcessed / 256) });
@@ -1285,6 +1322,50 @@ async function runDiscovery({ db, redis, input, onProgress }) {
     report({ stage: 'cloud', status: 'done', cloud_resources: 0 });
   }
 
+  // ── VMware vSphere ──────────────────────────────────────────────────────
+  const vmwareEnabled = process.env.DISCOVERY_VMWARE_ENABLED === 'true';
+  report({ stage: 'vmware', status: vmwareEnabled ? 'running' : 'skipped' });
+  if (vmwareEnabled) {
+    try {
+      const vmwareResources = await discoverVMware();
+      for (const res of vmwareResources) {
+        await saveFindings(db, run.id, tenant, {
+          type: 'vmware_resource_discovered',
+          severity: 'info',
+          source: 'vmware-vsphere',
+          asset_key: `vmware:${res.name}`,
+          payload: res,
+        });
+      }
+      report({ stage: 'vmware', status: 'done', vmware_resources: vmwareResources.length });
+    } catch (e) {
+      log('warn', 'VMware discovery failed', { err: e.message });
+      report({ stage: 'vmware', status: 'error' });
+    }
+  }
+
+  // ── Proxmox VE ─────────────────────────────────────────────────────────
+  const proxmoxEnabled = process.env.DISCOVERY_PROXMOX_ENABLED === 'true';
+  report({ stage: 'proxmox', status: proxmoxEnabled ? 'running' : 'skipped' });
+  if (proxmoxEnabled) {
+    try {
+      const proxmoxResources = await discoverProxmox();
+      for (const res of proxmoxResources) {
+        await saveFindings(db, run.id, tenant, {
+          type: 'proxmox_resource_discovered',
+          severity: 'info',
+          source: 'proxmox-ve',
+          asset_key: `proxmox:${res.name}`,
+          payload: res,
+        });
+      }
+      report({ stage: 'proxmox', status: 'done', proxmox_resources: proxmoxResources.length });
+    } catch (e) {
+      log('warn', 'Proxmox discovery failed', { err: e.message });
+      report({ stage: 'proxmox', status: 'error' });
+    }
+  }
+
   // ── LLDP/CDP Active ───────────────────────────────────────────────────
   const lldpEnabled = input.lldp_enabled === true || process.env.DISCOVERY_LLDP_ENABLED === 'true';
   report({ stage: 'lldp_cdp', status: lldpEnabled ? 'running' : 'skipped' });
@@ -1514,8 +1595,12 @@ async function runDiscovery({ db, redis, input, onProgress }) {
         const osHint = osClass.os || (sysDescr.includes('Linux') ? 'Linux' : sysDescr.includes('Windows') ? 'Windows' : null);
 
         await db.query(
-          `UPDATE observe_assets SET os_hint = COALESCE($2, os_hint), vendor = COALESCE($3, vendor), product = COALESCE($4, product), metadata = metadata || '{}'::jsonb, updated_at = NOW() WHERE id = $1`,
-          [asset.id, osHint, osClass.vendor || null, osClass.os || osHint || null]
+          `UPDATE observe_assets
+           SET os_hint = COALESCE($2, os_hint), vendor = COALESCE($3, vendor), product = COALESCE($4, product),
+               metadata = metadata || '{}'::jsonb, updated_at = NOW()
+           WHERE id = $1 AND tenant_id = $5 AND site_id = $6 AND edge_id = $7`,
+          [asset.id, osHint, osClass.vendor || null, osClass.os || osHint || null,
+            tenant.tenant_id, tenant.site_id, tenant.edge_id]
         );
         asset.os_hint = osHint || asset.os_hint;
         asset.vendor = osClass.vendor || asset.vendor;
@@ -1625,8 +1710,8 @@ async function runDiscovery({ db, redis, input, onProgress }) {
 
   report({ stage: 'icinga', status: 'done' });
 
-	  const summary = { scanned_targets: scanned, blocked_targets: blockedTargets, discovered_assets: assets.length, topology_edges: edges.length, file_sd_targets: sd.total };
-  await completeRun(db, run.id, 'completed', summary);
+	  const summary = { scanned_targets: scanned, failed_targets: targetFailures, blocked_targets: blockedTargets, discovered_assets: assets.length, topology_edges: edges.length, file_sd_targets: sd.total };
+  await completeRun(db, run.id, tenant, 'completed', summary);
 
   // Update gauges
   metrics.scanTargetsTotal.set(targets.length);
@@ -1654,6 +1739,7 @@ async function runDiscovery({ db, redis, input, onProgress }) {
   if (redis) {
     const resultEvt = JSON.stringify({
       type: 'scan:results',
+      queue_job_id: input.queue_job_id || null,
       run_id: run.id,
       tenant_id: tenant.tenant_id,
       site_id: tenant.site_id,
@@ -1688,7 +1774,7 @@ async function runDiscovery({ db, redis, input, onProgress }) {
     const summary = { error: e.message, stage: _safeStage(onProgress) };
     if (run?.id) {
       try {
-        await completeRun(db, run.id, 'failed', summary);
+        await completeRun(db, run.id, tenant, 'failed', summary);
         await saveFindings(db, run.id, tenant, {
           type: 'discovery_run_failed',
           severity: 'error',
@@ -1727,4 +1813,4 @@ function isDockerEnvironment() {
   return false;
 }
 
-module.exports = { runDiscovery };
+module.exports = { runDiscovery, detectPortChanges };

@@ -11,6 +11,7 @@ const { fingerprintAsset } = require('../fingerprint/engine');
 const { writeGraph: writeNeo4jGraph, enabled: neo4jEnabled } = require('../topology/graph-store');
 const { emitEvent } = require('../queues/events');
 const { upsertAsset } = require('../engine/repository');
+const metrics = require('../metrics');
 
 function passiveAssetKey(evt) {
   if (evt.mac) return `mac:${evt.mac}`;
@@ -43,7 +44,6 @@ function inferPassivePorts(evt) {
     if (Number.isInteger(n) && n > 0 && n <= 65535) ports.add(n);
   };
 
-  addIfValid(evt?.payload?.source_port);
   addIfValid(evt?.payload?.port);
 
   const byType = {
@@ -133,14 +133,51 @@ async function persistPassiveTopology({ dbConn, tenant, asset, services }) {
 function createPassiveIngest({ db, redis, log, parseScope }) {
   async function ingestPassiveEvents(events) {
     const list = Array.isArray(events) ? events : [events];
+    if (list.length > 100) {
+      metrics.passiveRejected.inc({ reason: 'batch_limit' });
+      throw new Error('passive event batch exceeds limit (100)');
+    }
     let accepted = 0;
 
     for (const evt of list) {
       const parsed = normalizePassiveEvent(evt);
       if (!parsed) continue;
       const tenant = parseScope(evt || {});
+      const assetKey = passiveAssetKey(parsed);
+      const dbConn = await db.connect();
+      let asset;
+      let services;
+      let writtenEdges;
+      let fp;
+      let row;
 
-      await db.query(
+      try {
+      await dbConn.query('BEGIN');
+      await dbConn.query(
+        `SELECT pg_advisory_xact_lock(hashtext($1))`,
+        [`passive:${tenant.tenant_id}:${tenant.site_id}:${tenant.edge_id}`]
+      );
+
+      const existing = await dbConn.query(
+        `SELECT 1 FROM observe_assets WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND asset_key=$4 LIMIT 1`,
+        [tenant.tenant_id, tenant.site_id, tenant.edge_id, assetKey]
+      );
+      if (!existing.rows.length) {
+        const maxPassiveAssets = Math.max(1, parseInt(process.env.DISCOVERY_PASSIVE_MAX_ASSETS || '5000', 10));
+        const count = await dbConn.query(
+          `SELECT COUNT(*)::int AS count FROM observe_assets
+           WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND metadata ? 'passive'`,
+          [tenant.tenant_id, tenant.site_id, tenant.edge_id]
+        );
+        if ((count.rows[0]?.count || 0) >= maxPassiveAssets) {
+          metrics.passiveRejected.inc({ reason: 'cardinality_limit' });
+          log('warn', 'Passive asset cardinality limit reached', { ...tenant, max: maxPassiveAssets });
+          await dbConn.query('ROLLBACK');
+          continue;
+        }
+      }
+
+      await dbConn.query(
         `INSERT INTO observe_discovery_findings
           (id, run_id, tenant_id, site_id, edge_id, finding_type, severity, source, asset_key, payload, observed_at)
          VALUES (gen_random_uuid(),NULL,$1,$2,$3,'passive_signal','info',$4,$5,$6,NOW())`,
@@ -149,13 +186,13 @@ function createPassiveIngest({ db, redis, log, parseScope }) {
           tenant.site_id,
           tenant.edge_id,
           `passive:${parsed.type}`,
-          passiveAssetKey(parsed),
+          assetKey,
           JSON.stringify(parsed),
         ]
       );
 
       const passivePorts = inferPassivePorts(parsed);
-      const fp = fingerprintAsset({
+      fp = fingerprintAsset({
         hostname: parsed.hostname || null,
         open_ports: passivePorts,
         snmp_sysdescr: parsed.type === 'snmp_trap' ? (parsed.payload?.raw_text || null) : null,
@@ -165,9 +202,9 @@ function createPassiveIngest({ db, redis, log, parseScope }) {
         os_hint: parsed.payload?.os_hint || null,
       });
 
-      const row = {
+      row = {
         ...tenant,
-        asset_key: passiveAssetKey(parsed),
+        asset_key: assetKey,
         asset_name: passiveAssetName(parsed),
         display_name: passiveAssetName(parsed),
         primary_ip: parsed.source_ip || null,
@@ -180,10 +217,10 @@ function createPassiveIngest({ db, redis, log, parseScope }) {
         confidence: Math.max(0.6, Number(fp.confidence || 0.7)),
         metadata: { passive: parsed, fingerprint: fp, lifecycle: 'discovered' },
       };
-      const asset = await upsertAsset(db, row);
-      const services = await storePassiveServices({ dbConn: db, asset, tenant, parsed, ports: passivePorts, fingerprint: fp });
+      asset = await upsertAsset(dbConn, row);
+      services = await storePassiveServices({ dbConn, asset, tenant, parsed, ports: passivePorts, fingerprint: fp });
 
-      await db.query(
+      await dbConn.query(
         `INSERT INTO observe_service_fingerprints
          (id, tenant_id, site_id, edge_id, asset_id, service_key, fingerprint, confidence, observed_at)
          VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,NOW())
@@ -192,14 +229,21 @@ function createPassiveIngest({ db, redis, log, parseScope }) {
         [tenant.tenant_id, tenant.site_id, tenant.edge_id, asset.id, `passive:${parsed.type}`, JSON.stringify(fp), fp.confidence || 0.7]
       );
 
-      await db.query(
+      await dbConn.query(
         `INSERT INTO observe_asset_history
           (id, tenant_id, site_id, edge_id, asset_id, snapshot, captured_at, snapshot_type)
          VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,NOW(),'passive-event')`,
         [tenant.tenant_id, tenant.site_id, tenant.edge_id, asset.id, JSON.stringify({ asset: row, fingerprint: fp, services, passive: parsed })]
       );
 
-      const writtenEdges = await persistPassiveTopology({ dbConn: db, tenant, asset: { ...asset, primary_ip: row.primary_ip }, services });
+      writtenEdges = await persistPassiveTopology({ dbConn, tenant, asset: { ...asset, primary_ip: row.primary_ip }, services });
+      await dbConn.query('COMMIT');
+      } catch (error) {
+        try { await dbConn.query('ROLLBACK'); } catch (_) { /* preserva o erro original */ }
+        throw error;
+      } finally {
+        dbConn.release();
+      }
 
       if (neo4jEnabled() && writtenEdges > 0) {
         try {

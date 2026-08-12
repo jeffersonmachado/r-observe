@@ -20,7 +20,9 @@
 // Registro: agentes se registram ao iniciar e enviam heartbeat.
 
 const { log } = require('../utils/logger');
-const { signInternalToken } = require('../jwt');
+const { signInternalToken } = require('@results/auth');
+const { runWithTenant } = require('../shared/tenant-context');
+const fs = require('fs');
 
 // ── Agente: heartbeat e registro ─────────────────────────────────────────
 
@@ -35,7 +37,7 @@ async function registerAgent({ agentId, hostname, subnets, capabilities }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'admin' }),
+        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'operator', aud: 'discovery', scope: ['discovery:access', 'discovery:write'] }),
       },
       body: JSON.stringify({
         agent_id: agentId || AGENT_ID,
@@ -67,7 +69,7 @@ async function sendHeartbeat({ agentId }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'admin' }),
+        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'operator', aud: 'discovery', scope: ['discovery:access', 'discovery:write'] }),
       },
       body: JSON.stringify({
         agent_id: agentId || AGENT_ID,
@@ -85,14 +87,26 @@ async function sendHeartbeat({ agentId }) {
 // Detecta capacidades do agente local.
 function detectCapabilities() {
   const caps = [];
-  const { execSync } = require('child_process');
-
-  try { execSync('which ping', { timeout: 2000 }); caps.push('icmp'); } catch (_) {}
-  try { execSync('which kubectl', { timeout: 2000 }); caps.push('k8s'); } catch (_) {}
-  try { execSync('which hcitool', { timeout: 2000 }); caps.push('bluetooth'); } catch (_) {}
-  try { execSync('which lldpcli', { timeout: 2000 }); caps.push('lldp'); } catch (_) {}
-  try { execSync('which docker', { timeout: 2000 }); caps.push('docker'); } catch (_) {}
-  try { execSync('which ip', { timeout: 2000 }); caps.push('arp'); } catch (_) {}
+  const commandCapabilities = [
+    { capability: 'icmp', names: ['ping'] },
+    { capability: 'k8s', names: ['kubectl'] },
+    { capability: 'bluetooth', names: ['hcitool'] },
+    { capability: 'lldp', names: ['lldpcli'] },
+    { capability: 'docker', names: ['docker'] },
+    { capability: 'arp', names: ['ip'] },
+  ];
+  const searchDirs = ['/usr/local/bin', '/usr/bin', '/usr/sbin', '/bin', '/sbin'];
+  for (const item of commandCapabilities) {
+    const available = item.names.some(name => searchDirs.some(dir => {
+      try {
+        fs.accessSync(`${dir}/${name}`, fs.constants.X_OK);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }));
+    if (available) caps.push(item.capability);
+  }
 
   // Sempre tem TCP
   caps.push('tcp');
@@ -176,7 +190,7 @@ async function reportScanResults({ agentId, assets, findings }) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'admin' }),
+        'X-Internal-Token': signInternalToken({ sub: 'r-observe-discovery-agent', service: 'discovery', role: 'operator', aud: 'discovery', scope: ['discovery:access', 'discovery:write'] }),
       },
       body: JSON.stringify({
         agent_id: agentId || AGENT_ID,
@@ -236,42 +250,44 @@ function startAgent({ subnets, scanIntervalMs }) {
 // ── Servidor: recebe reports de agentes ──────────────────────────────────
 
 // Registra um agente no discovery central (chamado via API).
-async function handleAgentRegister(db, body) {
+async function handleAgentRegister(db, body, scope = {}) {
   const { agent_id, hostname, subnets, capabilities, version } = body || {};
 
-  await db.query(
+  const result = await db.query(
     `INSERT INTO observe_discovery_agents
-      (id, agent_id, hostname, subnets, capabilities, version, status, last_seen_at)
-     VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'online',NOW())
-     ON CONFLICT (agent_id)
+      (id, tenant_id, site_id, edge_id, agent_id, hostname, subnets, capabilities, version, status, last_seen_at)
+     VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,'online',NOW())
+     ON CONFLICT (tenant_id, site_id, edge_id, agent_id)
      DO UPDATE SET hostname = EXCLUDED.hostname, subnets = EXCLUDED.subnets,
                    capabilities = EXCLUDED.capabilities, version = EXCLUDED.version,
                    status = 'online', last_seen_at = NOW(), updated_at = NOW()`,
-    [agent_id, hostname, JSON.stringify(subnets || []), JSON.stringify(capabilities || []), version || '1.0.0']
+    [scope.tenant_id || 'default', scope.site_id || 'default-site', scope.edge_id || 'central', agent_id, hostname,
+     JSON.stringify(subnets || []), JSON.stringify(capabilities || []), version || '1.0.0']
   );
 
   return { registered: true, agent_id };
 }
 
 // Heartbeat do agente.
-async function handleAgentHeartbeat(db, body) {
+async function handleAgentHeartbeat(db, body, scope = {}) {
   const { agent_id } = body || {};
-  await db.query(
+  const result = await db.query(
     `UPDATE observe_discovery_agents SET last_seen_at = NOW(), status = 'online', updated_at = NOW()
-     WHERE agent_id = $1`,
-    [agent_id]
+     WHERE agent_id = $1 AND tenant_id=$2 AND site_id=$3 AND edge_id=$4`,
+    [agent_id, scope.tenant_id || 'default', scope.site_id || 'default-site', scope.edge_id || 'central']
   );
-  return { heartbeat: true, agent_id };
+  return { heartbeat: result.rowCount > 0, agent_id };
 }
 
 // ── Offline detection: identifica agentes que pararam de responder ──────
 const AGENT_OFFLINE_THRESHOLD_MS = parseInt(process.env.AGENT_OFFLINE_THRESHOLD_MS || '300000', 10); // 5min default
 let _offlineTimer = null;
 
-async function detectOfflineAgents(db) {
+async function detectOfflineAgentsForTenant(db, redis, tenantId) {
+  return runWithTenant(tenantId, async () => {
   const threshold = new Date(Date.now() - AGENT_OFFLINE_THRESHOLD_MS);
   const result = await db.query(
-    `SELECT agent_id, hostname, last_seen_at, capabilities
+    `SELECT tenant_id, site_id, edge_id, agent_id, hostname, last_seen_at, capabilities
      FROM observe_discovery_agents
      WHERE status = 'online' AND last_seen_at < $1`,
     [threshold.toISOString()]
@@ -280,12 +296,14 @@ async function detectOfflineAgents(db) {
   const offline = result.rows || [];
   if (!offline.length) return { offline: 0 };
 
-  await db.query(
-    `UPDATE observe_discovery_agents
-     SET status = 'offline', updated_at = NOW()
-     WHERE agent_id = ANY($1)`,
-    [offline.map(a => a.agent_id)]
-  );
+  for (const agent of offline) {
+    await db.query(
+      `UPDATE observe_discovery_agents
+       SET status = 'offline', updated_at = NOW()
+       WHERE tenant_id = $1 AND site_id = $2 AND edge_id = $3 AND agent_id = $4`,
+      [agent.tenant_id, agent.site_id, agent.edge_id, agent.agent_id]
+    );
+  }
 
   log('warn', 'Agents offline detected', {
     count: offline.length,
@@ -295,8 +313,6 @@ async function detectOfflineAgents(db) {
 
   // Emite eventos para cada agente offline
   try {
-    const { emitEvent } = require('../queues/events');
-    const redis = require('ioredis');
     if (redis) {
       for (const agent of offline) {
         await emitEvent(redis, 'observe.discovery.agent_offline', {
@@ -304,6 +320,9 @@ async function detectOfflineAgents(db) {
           hostname: agent.hostname,
           last_seen: agent.last_seen_at,
           capabilities: agent.capabilities,
+          tenant_id: agent.tenant_id,
+          site_id: agent.site_id,
+          edge_id: agent.edge_id,
           offline_duration_ms: Date.now() - new Date(agent.last_seen_at).getTime(),
         });
       }
@@ -313,12 +332,23 @@ async function detectOfflineAgents(db) {
   }
 
   return { offline: offline.length, agents: offline.map(a => a.agent_id) };
+  });
 }
 
-function startOfflineDetection(db, intervalMs = 60000) {
+async function detectOfflineAgents(db, redis = null) {
+  const tenants = await db.query(`SELECT id FROM observe_tenants WHERE status = 'active' ORDER BY id`);
+  const detected = [];
+  for (const tenant of tenants.rows) {
+    const result = await detectOfflineAgentsForTenant(db, redis, tenant.id);
+    detected.push(...(result.agents || []).map(agent_id => ({ tenant_id: tenant.id, agent_id })));
+  }
+  return { offline: detected.length, agents: detected };
+}
+
+function startOfflineDetection(db, redis = null, intervalMs = 60000) {
   if (_offlineTimer) return;
   _offlineTimer = setInterval(() => {
-    detectOfflineAgents(db).catch(e =>
+    detectOfflineAgents(db, redis).catch(e =>
       log('warn', 'Agent offline detection failed', { err: e.message })
     );
   }, intervalMs);
@@ -333,29 +363,40 @@ function stopOfflineDetection() {
 // Processa report de scan de agente remoto.
 async function handleAgentReport({ db, redis, body }) {
   const { agent_id, assets, findings } = body || {};
+  const scope = body.scope || { tenant_id: 'default', site_id: 'default-site', edge_id: 'central' };
 
+  const dbConn = await db.connect();
   let accepted = 0;
+  try {
+  await dbConn.query('BEGIN');
   for (const asset of (assets || [])) {
-    await db.query(
+    await dbConn.query(
       `INSERT INTO observe_assets
         (id, tenant_id, site_id, edge_id, asset_key, asset_name, primary_ip, asset_type, vendor, confidence, metadata)
-       VALUES (gen_random_uuid(),'default','default-site','central',$1,$2,$3,'host',$4,0.7,$5)
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,'host',$7,0.7,$8)
        ON CONFLICT (tenant_id, site_id, edge_id, asset_key)
        DO UPDATE SET last_seen_at = NOW(), updated_at = NOW()`,
-      [asset.asset_key, asset.asset_name, asset.primary_ip, asset.vendor || null,
+      [scope.tenant_id, scope.site_id, scope.edge_id, asset.asset_key, asset.asset_name, asset.primary_ip, asset.vendor || null,
        JSON.stringify({ source: 'agent', agent_id, ...asset })]
     );
     accepted++;
   }
 
   for (const finding of (findings || [])) {
-    await db.query(
+    await dbConn.query(
       `INSERT INTO observe_discovery_findings
         (id, run_id, tenant_id, site_id, edge_id, finding_type, severity, source, asset_key, payload, observed_at)
-       VALUES (gen_random_uuid(),NULL,'default','default-site','central',$1,'info',$2,$3,$4,NOW())`,
-      [finding.type, `agent:${agent_id}`, finding.payload?.host || finding.asset_key || 'unknown',
+       VALUES (gen_random_uuid(),NULL,$1,$2,$3,$4,'info',$5,$6,$7,NOW())`,
+      [scope.tenant_id, scope.site_id, scope.edge_id, finding.type, `agent:${agent_id}`, finding.payload?.host || finding.asset_key || 'unknown',
        JSON.stringify({ ...finding, agent_id })]
     );
+  }
+  await dbConn.query('COMMIT');
+  } catch (error) {
+    try { await dbConn.query('ROLLBACK'); } catch (_) { /* preserva o erro original */ }
+    throw error;
+  } finally {
+    dbConn.release();
   }
 
   // Emite eventos
@@ -385,6 +426,7 @@ module.exports = {
   handleAgentHeartbeat,
   handleAgentReport,
   detectOfflineAgents,
+  detectOfflineAgentsForTenant,
   startOfflineDetection,
   stopOfflineDetection,
 };

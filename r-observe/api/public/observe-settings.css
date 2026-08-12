@@ -49,6 +49,10 @@ body {
   transition: color .15s;
 }
 .topbar-link:hover { color: var(--text); }
+:where(a, button, input, select):focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
 
 /* ── Page layout ────────────────────────────────────────────────────────── */
 .settings-page {
@@ -70,11 +74,14 @@ body {
 
 .settings-panel,
 .aside-panel {
+  min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 1.5rem;
 }
+.loading-state { color: var(--muted); padding: 2rem 0; text-align: center; }
+.tab-btn:disabled { opacity: .55; cursor: wait; }
 
 .settings-aside {
   display: flex;
@@ -186,8 +193,7 @@ body {
 .provider-icon { font-size: 1.15rem; display: block; margin-bottom: .25rem; }
 
 /* ── Key / token rows ────────────────────────────────────────────────────── */
-#api-key-section { display: none; }
-#api-key-section.visible { display: block; }
+#api-key-section { display: block; }
 
 .settings-panel .key-row { display: flex; gap: .5rem; }
 .settings-panel .key-row input { flex: 1; }
@@ -286,7 +292,7 @@ body {
 }
 
 /* ── Tabs ────────────────────────────────────────────────────────────────── */
-.tabs { display: flex; gap: 2px; margin-bottom: 1.5rem; border-bottom: 2px solid var(--border); }
+.tabs { display: flex; gap: 2px; max-width: 100%; overflow-x: auto; margin-bottom: 1.5rem; border-bottom: 2px solid var(--border); }
 .tab-btn {
   background: transparent; border: none; color: var(--muted); cursor: pointer;
   font-size: .82rem; font-weight: 600; padding: .6rem 1.1rem;
@@ -305,10 +311,17 @@ body {
 .toggle-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background: var(--text); border-radius: 50%; transition: .25s; }
 .toggle-switch input:checked + .toggle-slider { background: var(--accent); }
 .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
+.toggle-switch input:focus-visible + .toggle-slider { outline: 3px solid #fff; outline-offset: 2px; }
 
 /* ── Status card ─────────────────────────────────────────────────────────── */
 .status-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: .8rem; margin-bottom: 1.5rem; }
 @media (max-width: 760px) { .status-cards { grid-template-columns: 1fr; } }
+@media (max-width: 760px) {
+  .topbar { padding-inline: 12px; flex-wrap: wrap; }
+  .settings-page { padding-inline: 12px; }
+  .settings-panel, .aside-panel { padding: 1rem; }
+  .tab-btn { flex: 0 0 auto; padding-inline: .8rem; }
+}
 .status-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: .9rem 1rem; text-align: center; }
 .status-card .card-value { font-size: 1.5rem; font-weight: 700; }
 .status-card .card-label { font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: .2rem; }

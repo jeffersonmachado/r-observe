@@ -1,20 +1,23 @@
-FROM node:20-alpine
+FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
 
 # curl para SSL checks; openssl para inspeção de cert
 RUN apk add --no-cache wget curl openssl
 
-WORKDIR /app
+WORKDIR /app/r-observe/agent
 
-COPY agent/package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY r-observe/r-observe/agent/package*.json ./
+COPY r-observe/packages/auth/ /app/packages/auth/
+RUN test -f package-lock.json && npm ci --omit=dev && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx
 
-COPY agent/src/   ./src/
-COPY shared/       ./shared/
-
-RUN addgroup -S observe && adduser -S observe -G observe
+COPY r-observe/r-observe/agent/src/   ./src/
+COPY r-observe/r-observe/shared/       ./shared/
 
 # O agente precisa ler /var/run/docker.sock para inventariar containers.
 # O socket fica montado como :ro no compose, mas o GID varia entre hosts.
+
+USER node
 
 EXPOSE 3000
 

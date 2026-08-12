@@ -68,8 +68,7 @@ EXTRACTION_STATUS="skip"
 UNIT_TEST_STATUS="skip"
 RUNTIME_STATUS="skip"
 RUNTIME_DETAIL="stack not running"
-_SECRET="${JWT_SECRET:-}"
-DISCOVERY_TOKEN="${_SECRET:+$(node "${ROOT_DIR}/scripts/observe/jwt-sign.js" release-smoke 15m 2>/dev/null || true)}"
+DISCOVERY_TOKEN="$(JWT_AUDIENCE=discovery JWT_SCOPE=discovery:access node "${ROOT_DIR}/scripts/observe/jwt-sign.js" release-smoke 15m 2>/dev/null || true)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # FASE A — EXTRAÇÃO EM DIRETÓRIO LIMPO

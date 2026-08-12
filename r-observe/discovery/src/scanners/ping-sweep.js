@@ -5,12 +5,12 @@
 // Usa /bin/ping com timeout curto para varredura rapida de subnets.
 // Suporta sweep de ranges inteiros (ex: 10.10.2.0/24) em paralelo.
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { log } = require('../utils/logger');
 const { isValidIPv4 } = require('./target-expansion');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_COUNT = 1;
 const DEFAULT_TIMEOUT_SEC = 1;
@@ -18,13 +18,14 @@ const MAX_PARALLEL = 50;
 
 // Executa ping contra um unico host. Retorna { alive, latency_ms }.
 async function pingHost(host, opts = {}) {
-  const count = opts.count || DEFAULT_COUNT;
-  const timeout = opts.timeout || DEFAULT_TIMEOUT_SEC;
+  if (!isValidIPv4(host)) return { alive: false, host };
+  const count = Math.max(1, Math.min(5, Number(opts.count) || DEFAULT_COUNT));
+  const timeout = Math.max(1, Math.min(10, Number(opts.timeout) || DEFAULT_TIMEOUT_SEC));
 
   try {
     const start = Date.now();
-    const { stdout } = await execAsync(
-      `ping -c ${count} -W ${timeout} -n ${host}`,
+    const { stdout } = await execFileAsync(
+      'ping', ['-c', String(count), '-W', String(timeout), '-n', host],
       { timeout: (timeout + 2) * 1000 }
     );
     const elapsed = Date.now() - start;

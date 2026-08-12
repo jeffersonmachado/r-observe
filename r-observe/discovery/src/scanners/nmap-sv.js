@@ -1,8 +1,9 @@
 'use strict';
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+const { isValidHost, isValidPort } = require('../validators');
 
 /**
  * Run Nmap -sV on specific ports of a host.
@@ -14,12 +15,14 @@ const execAsync = promisify(exec);
  */
 async function nmapServiceScan(host, ports = []) {
   if (!ports || ports.length === 0) return [];
-  
-  const portList = ports.join(',');
-  const cmd = `nmap -sV -p ${portList} -T4 --version-intensity 5 ${host} 2>/dev/null`;
+  if (!isValidHost(host)) return [];
+  const safePorts = ports.map(Number).filter(isValidPort);
+  if (!safePorts.length) return [];
+  const portList = safePorts.join(',');
   
   try {
-    const { stdout } = await execAsync(cmd, { timeout: 30000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFileAsync('nmap', ['-sV', '-p', portList, '-T4', '--version-intensity', '5', String(host)],
+      { timeout: 30000, maxBuffer: 1024 * 1024 });
     return parseNmapOutput(stdout);
   } catch (e) {
     return [];

@@ -15,7 +15,7 @@ fi
 DISCOVERY_CONTAINER="r-observe-discovery"
 REDIS_CONTAINER="r-observe-redis"
 PG_CONTAINER="r-observe-postgres"
-TOKEN="${JWT_SECRET:-}"
+TOKEN=""
 DB_USER="${OBSERVE_DB_USER:-observe}"
 DB_NAME="${OBSERVE_DB_NAME:-observedb}"
 
@@ -80,10 +80,7 @@ require_container "$DISCOVERY_CONTAINER"
 require_container "$REDIS_CONTAINER"
 require_container "$PG_CONTAINER"
 
-if [[ -z "$TOKEN" ]]; then
-  ko "JWT_SECRET ausente"
-  exit 1
-fi
+TOKEN="$(JWT_AUDIENCE=discovery JWT_SCOPE='discovery:access discovery:write' JWT_TENANT_ID=discovery-enterprise-smoke node "${ROOT_DIR}/scripts/observe/jwt-sign.js" discovery-enterprise-smoke 15m)"
 
 # 1) Health
 HEALTH_OK=0
@@ -132,7 +129,7 @@ EDGES_BEFORE="$(db_count observe_topology_edges || echo 0)"
 
 # 5) Scan com CIDR real
 set +e
-SCAN_RESP="$(docker exec "$DISCOVERY_CONTAINER" node -e 'const h=require("http");const data=JSON.stringify({profile:"safe",trigger:"enterprise-smoke",tenant_id:"default",site_id:"default-site",edge_id:"central",targets:["10.10.2.0/30"]});const req=h.request({hostname:"127.0.0.1",port:3010,path:"/api/discovery/scan",method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(data),"x-internal-token":process.argv[1]}},(r)=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>process.stdout.write(d));});req.on("error",()=>process.exit(1));req.write(data);req.end();' "$TOKEN" 2>/dev/null)"
+SCAN_RESP="$(docker exec "$DISCOVERY_CONTAINER" node -e 'const h=require("http");const data=JSON.stringify({profile:"safe",trigger:"enterprise-smoke",tenant_id:"default",site_id:"default-site",edge_id:"central",targets:[{address:"10.10.2.0/30",discovery_type:"cidr"}]});const req=h.request({hostname:"127.0.0.1",port:3010,path:"/api/discovery/scan",method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(data),"x-internal-token":process.argv[1]}},(r)=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>process.stdout.write(d));});req.on("error",()=>process.exit(1));req.write(data);req.end();' "$TOKEN" 2>/dev/null)"
 SCAN_RC=$?
 set -e
 if [[ "$SCAN_RC" -eq 0 ]] && echo "$SCAN_RESP" | grep -q '"queued"\|"run_id"'; then
@@ -219,7 +216,7 @@ else
 fi
 
 # 9) Redis event queue sanity
-if docker exec "$REDIS_CONTAINER" redis-cli LLEN observe:events >/tmp/discovery-enterprise-events.out 2>/dev/null; then
+if docker exec -e REDISCLI_AUTH="${OBSERVE_REDIS_PASSWORD:-}" "$REDIS_CONTAINER" redis-cli LLEN observe:events >/tmp/discovery-enterprise-events.out 2>/dev/null; then
   ok "redis event queue acessível"
 else
   ko "redis event queue acessível"

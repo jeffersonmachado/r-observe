@@ -13,14 +13,15 @@
  *   - Armazenamento em disco + metadata no PostgreSQL
  */
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { log } = require('../utils/logger');
+const { isValidHost, isValidPort } = require('../validators');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // ── Configuração ────────────────────────────────────────────────────────────
 
@@ -109,6 +110,10 @@ async function backupConfig(asset, dbConn) {
   const sshUser = asset.ssh_user || process.env.CONFIG_BACKUP_SSH_USER || 'admin';
   const sshPass = asset.ssh_password || process.env.SSH_PASSWORD;
   const sshPort = asset.ssh_port || 22;
+  if (!isValidHost(host)) throw new Error('Invalid backup host');
+  if (!isValidPort(sshPort)) throw new Error('Invalid SSH port');
+  if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(String(sshUser))) throw new Error('Invalid SSH user');
+  if (!sshPass) throw new Error('SSH password is required');
   const vendor = detectVendor(asset);
   const method = getMethod(vendor);
 
@@ -151,17 +156,16 @@ async function backupConfig(asset, dbConn) {
 
     // Salva em disco
     const filePath = path.join(BACKUP_DIR, host, `${result.timestamp.replace(/[:.]/g, '-')}.cfg`);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, config);
-
-    // Persiste metadata no DB
-    if (dbConn) {
-      await persistBackupMetadata(dbConn, asset, result, config);
-    }
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    // Configurações de rede frequentemente contêm comunidades, hashes e outros
+    // segredos. Não dependemos do umask do processo para protegê-las.
+    fs.chmodSync(path.dirname(filePath), 0o700);
+    fs.writeFileSync(filePath, config, { mode: 0o600 });
 
     // Detecta diff com versão anterior
-    const diffResult = await computeDiff(host, config, dbConn);
+    const diffResult = await computeDiff(host, config, dbConn, asset);
     result.diff = diffResult;
+    if (dbConn) await persistBackupMetadata(dbConn, asset, result, config);
 
   } catch (e) {
     result.error = e.message;
@@ -174,16 +178,17 @@ async function backupConfig(asset, dbConn) {
 // ── Collectors ──────────────────────────────────────────────────────────────
 
 async function collectViaCli(host, command, user, password, port) {
-  const sshCmd = `sshpass -p '${password.replace(/'/g, `'"'"'`)}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${port} ${user}@${host} '${command}' 2>/dev/null`;
+  const options = { timeout: SSH_TIMEOUT, env: { ...process.env, SSHPASS: password } };
+  const args = ['-e', 'ssh', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-p', String(port), `${user}@${host}`, command];
 
   try {
-    const { stdout } = await execAsync(sshCmd, { timeout: SSH_TIMEOUT });
+    const { stdout } = await execFileAsync('sshpass', args, options);
     return stdout;
   } catch (e) {
     // Tenta com -tt para devices que precisam de PTY
-    const ttyCmd = `sshpass -p '${password.replace(/'/g, `'"'"'`)}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -tt -p ${port} ${user}@${host} '${command}' 2>/dev/null`;
     try {
-      const { stdout } = await execAsync(ttyCmd, { timeout: SSH_TIMEOUT });
+      const ttyArgs = ['-e', 'ssh', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-tt', '-p', String(port), `${user}@${host}`, command];
+      const { stdout } = await execFileAsync('sshpass', ttyArgs, options);
       return stdout;
     } catch (ee) {
       throw new Error(`CLI collection failed: ${ee.message}`);
@@ -193,17 +198,18 @@ async function collectViaCli(host, command, user, password, port) {
 
 async function collectViaScp(host, vendor, user, password, port) {
   const remotePath = vendorScpPath(vendor);
-  const tmpFile = `/tmp/r-observe-config-${host}-${Date.now()}.cfg`;
-
-  const scpCmd = `sshpass -p '${password.replace(/'/g, `'"'"'`)}' scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -P ${port} ${user}@${host}:${remotePath} ${tmpFile} 2>/dev/null`;
+  const tmpFile = `/tmp/r-observe-config-${crypto.randomUUID()}.cfg`;
 
   try {
-    await execAsync(scpCmd, { timeout: SSH_TIMEOUT });
+    await execFileAsync('sshpass', ['-e', 'scp', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-P', String(port), `${user}@${host}:${remotePath}`, tmpFile],
+      { timeout: SSH_TIMEOUT, env: { ...process.env, SSHPASS: password } });
     const config = fs.readFileSync(tmpFile, 'utf8');
     fs.unlinkSync(tmpFile);
     return config;
   } catch (e) {
     throw new Error(`SCP collection failed: ${e.message}`);
+  } finally {
+    try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch (_) {}
   }
 }
 
@@ -220,14 +226,15 @@ function vendorScpPath(vendor) {
 
 // ── Diff Engine ─────────────────────────────────────────────────────────────
 
-async function computeDiff(host, currentConfig, dbConn) {
+async function computeDiff(host, currentConfig, dbConn, asset = {}) {
   if (!dbConn) return { changes: 0, added: 0, removed: 0 };
 
   try {
     const { rows } = await dbConn.query(
       `SELECT config_text, sha256 FROM observe_config_backups
-       WHERE host = $1 ORDER BY collected_at DESC LIMIT 1`,
-      [host]
+       WHERE host = $1 AND tenant_id = $2 AND site_id = $3 AND edge_id = $4
+       ORDER BY collected_at DESC LIMIT 1`,
+      [host, asset.tenant_id || 'default', asset.site_id || 'default-site', asset.edge_id || 'central']
     );
 
     if (!rows.length) return { changes: 0, added: 0, removed: 0 };
@@ -256,9 +263,12 @@ async function persistBackupMetadata(dbConn, asset, result, config) {
   try {
     await dbConn.query(
       `INSERT INTO observe_config_backups
-       (host, asset_id, vendor, method, success, sha256, lines, error, config_text, collected_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       (tenant_id, site_id, edge_id, host, asset_id, vendor, method, success, sha256, lines, error, config_text, collected_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
+        asset.tenant_id || 'default',
+        asset.site_id || 'default-site',
+        asset.edge_id || 'central',
         result.host,
         asset.id || null,
         result.vendor,

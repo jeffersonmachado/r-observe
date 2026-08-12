@@ -64,4 +64,5 @@ test('bootstrapInitialUsers can force password updates explicitly', async () => 
   // Com force, deve usar UPDATE em vez de INSERT para usuário existente
   const updateQuery = queries.find(q => q.sql.includes('UPDATE icingaweb_user'));
   assert.ok(updateQuery, 'deve ter UPDATE icingaweb_user com forcePasswordUpdate');
+  assert.match(updateQuery.sql, /gen_salt\('bf', 12\)/);
 });

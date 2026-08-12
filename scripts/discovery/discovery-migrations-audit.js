@@ -14,11 +14,25 @@ const required = [
   '003_ai_catalog.sql',
   '004_discovery_engine.sql',
   '005_discovery_dedupe_indexes.sql',
-  '006_discovery_policy_limits.sql',
-  '007_ai_settings_persistence.sql',
-  '008_fingerprint_dedup.sql',
-  '009_topology_evidence.sql',
-  '010_rbac_sessions.sql',
+  '006_discovery_logical_asset_dedupe.sql',
+  '007_discovery_policy_limits.sql',
+  '008_ai_settings_persistence.sql',
+  '009_fingerprint_dedup.sql',
+  '010_topology_evidence.sql',
+  '011_rbac_sessions.sql',
+  '012_audit_log.sql',
+  '013_physical_layer.sql',
+  '014_scheduler_quotas.sql',
+  '015_agents.sql',
+  '016_snmp_deep.sql',
+  '017_csrf_protection.sql',
+  '018_multi_tenancy.sql',
+  '019_system_settings.sql',
+  '020_discovery_tenant_hardening.sql',
+  '021_discovery_alert_dedupe.sql',
+  '022_discovery_dependency_dedupe.sql',
+  '023_discovery_agents_tenant.sql',
+  '024_discovery_edge_scope.sql',
 ];
 
 const mirrorRequired = [
@@ -37,6 +51,15 @@ const mirrorRequired = [
   '013_physical_layer.sql',
   '014_scheduler_quotas.sql',
   '015_agents.sql',
+  '016_snmp_deep.sql',
+  '017_csrf_protection.sql',
+  '018_multi_tenancy.sql',
+  '019_system_settings.sql',
+  '020_discovery_tenant_hardening.sql',
+  '021_discovery_alert_dedupe.sql',
+  '022_discovery_dependency_dedupe.sql',
+  '023_discovery_agents_tenant.sql',
+  '024_discovery_edge_scope.sql',
 ];
 
 function sha(file) {
@@ -90,8 +113,8 @@ for (const file of required) {
   });
 }
 
-const migration008 = readSql(path.join(canonicalDir, '008_fingerprint_dedup.sql'));
-check('008 creates fingerprint unique index', /CREATE\s+UNIQUE\s+INDEX[\s\S]+observe_service_fingerprints\s*\([\s\S]*tenant_id[\s\S]*site_id[\s\S]*edge_id[\s\S]*asset_id[\s\S]*service_key/i.test(migration008), {
+const fingerprintMigration = readSql(path.join(canonicalDir, '009_fingerprint_dedup.sql'));
+check('009 creates fingerprint unique index', /CREATE\s+UNIQUE\s+INDEX[\s\S]+observe_service_fingerprints\s*\([\s\S]*tenant_id[\s\S]*site_id[\s\S]*edge_id[\s\S]*asset_id[\s\S]*service_key/i.test(fingerprintMigration), {
   index: 'uq_observe_service_fingerprints_key',
 });
 

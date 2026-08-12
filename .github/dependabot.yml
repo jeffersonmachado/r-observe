@@ -1,0 +1,72 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /
+    schedule: &weekly-npm
+      interval: weekly
+      day: monday
+      time: '09:30'
+      timezone: America/Sao_Paulo
+    groups: &npm-groups
+      production-minor-patch:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      development-minor-patch:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /packages/auth
+    schedule: *weekly-npm
+    groups: *npm-groups
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /r-observe
+    schedule: *weekly-npm
+    groups: *npm-groups
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /r-observe/api
+    schedule: *weekly-npm
+    groups: *npm-groups
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /r-observe/worker
+    schedule: *weekly-npm
+    groups: *npm-groups
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /r-observe/discovery
+    schedule: *weekly-npm
+    groups: *npm-groups
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /r-observe/ai
+    schedule: *weekly-npm
+    groups: *npm-groups
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /r-observe/agent
+    schedule: *weekly-npm
+    groups: *npm-groups
+    open-pull-requests-limit: 5

@@ -26,19 +26,21 @@ const transports = {
    * Email transport.
    */
   async email(alert, config) {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
+    const { spawn } = require('child_process');
 
     const subject = `[${alert.severity.toUpperCase()}] ${alert.rule_name}: ${alert.summary}`;
     const body = buildEmailBody(alert);
     const to = config.to || process.env.ALERT_EMAIL_TO || 'admin@localhost';
+    if (!/^[a-zA-Z0-9_.+@-]{1,254}$/.test(to) || /[\r\n]/.test(subject)) return false;
 
     try {
-      await execAsync(
-        `echo '${body.replace(/'/g, `'"'"'`)}' | mail -s '${subject.replace(/'/g, `'"'"'`)}' '${to}' 2>/dev/null`,
-        { timeout: 10000 }
-      );
+      await new Promise((resolve, reject) => {
+        const child = spawn('mail', ['-s', subject, to], { stdio: ['pipe', 'ignore', 'ignore'] });
+        const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('mail timeout')); }, 10000);
+        child.once('error', (e) => { clearTimeout(timer); reject(e); });
+        child.once('exit', (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`mail exit ${code}`)); });
+        child.stdin.end(body);
+      });
       return true;
     } catch (e) {
       log('error', 'Alert email failed', { err: e.message });
@@ -299,7 +301,7 @@ async function evaluateAlerts(rules, data, context = {}, dbConn = null) {
 
     // Dedup: não dispara o mesmo alerta duas vezes
     if (dbConn) {
-      const alreadyFired = await isAlertActive(dbConn, alert.fingerprint);
+      const alreadyFired = await isAlertActive(dbConn, alert.fingerprint, context);
       if (alreadyFired) continue;
     }
 
@@ -317,7 +319,7 @@ async function evaluateAlerts(rules, data, context = {}, dbConn = null) {
 
     // Persiste
     if (dbConn) {
-      await persistAlert(dbConn, alert, data);
+      await persistAlert(dbConn, alert, data, context);
     }
 
     firedAlerts.push(alert);
@@ -326,12 +328,12 @@ async function evaluateAlerts(rules, data, context = {}, dbConn = null) {
   return firedAlerts;
 }
 
-async function isAlertActive(dbConn, fingerprint) {
+async function isAlertActive(dbConn, fingerprint, context = {}) {
   try {
     const { rows } = await dbConn.query(
       `SELECT 1 FROM observe_alerts
-       WHERE fingerprint = $1 AND severity != 'ok' AND resolved_at IS NULL`,
-      [fingerprint]
+       WHERE fingerprint = $1 AND tenant_id=$2 AND site_id=$3 AND edge_id=$4 AND severity != 'ok' AND resolved_at IS NULL`,
+      [fingerprint, context.tenant_id || 'default', context.site_id || 'default-site', context.edge_id || 'central']
     );
     return rows.length > 0;
   } catch (e) {
@@ -344,23 +346,24 @@ async function checkRecovery(rule, data, dbConn, context) {
     const fingerprint = generateFingerprint(rule, data);
     await dbConn.query(
       `UPDATE observe_alerts SET severity = 'ok', resolved_at = NOW()
-       WHERE fingerprint = $1 AND severity != 'ok' AND resolved_at IS NULL`,
-      [fingerprint]
+       WHERE fingerprint = $1 AND tenant_id=$2 AND site_id=$3 AND edge_id=$4 AND severity != 'ok' AND resolved_at IS NULL`,
+      [fingerprint, context.tenant_id || 'default', context.site_id || 'default-site', context.edge_id || 'central']
     );
   } catch (e) {
     // Ignora erros de recovery
   }
 }
 
-async function persistAlert(dbConn, alert, data) {
+async function persistAlert(dbConn, alert, data, context = {}) {
   try {
     await dbConn.query(
       `INSERT INTO observe_alerts
-       (rule_name, rule_id, severity, summary, description, host, asset_id,
+       (tenant_id, site_id, edge_id, rule_name, rule_id, severity, summary, description, host, asset_id,
         metric, value, threshold, fingerprint, eval_results, fired_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
-       ON CONFLICT (fingerprint) WHERE severity != 'ok' DO NOTHING`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
+       ON CONFLICT (tenant_id, site_id, edge_id, fingerprint) WHERE resolved_at IS NULL DO NOTHING`,
       [
+        context.tenant_id || 'default', context.site_id || 'default-site', context.edge_id || 'central',
         alert.rule_name, alert.rule_id, alert.severity,
         alert.summary, alert.description, alert.host, alert.asset_id,
         alert.metric, alert.value, alert.threshold, alert.fingerprint,

@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 if [[ "${RELEASE_LOCK_HELD:-0}" != "1" ]]; then
-  RELEASE_LOCK_FILE="${RELEASE_LOCK_FILE:-/tmp/infra-release.lock}"
+  RELEASE_LOCK_FILE="${RELEASE_LOCK_FILE:-/tmp/r-observe-release.lock}"
   exec 9>"$RELEASE_LOCK_FILE"
   if ! flock -n 9; then
     echo "[zip-release] erro: outro pipeline de release esta em execucao (lock: $RELEASE_LOCK_FILE)" >&2
@@ -15,7 +15,7 @@ if [[ "${RELEASE_LOCK_HELD:-0}" != "1" ]]; then
   export RELEASE_LOCK_FILE
 fi
 
-OUTPUT="dist/infra-release.zip"
+OUTPUT="dist/r-observe-release.zip"
 DIST_CLEAN=0
 
 while [[ $# -gt 0 ]]; do
@@ -47,7 +47,7 @@ PROVENANCE_JSON="dist/${OUTPUT_BASE}-provenance.json"
 ATTESTATION_JSON="dist/${OUTPUT_BASE}-attestation.json"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}"
 
-MIN_FILE_COUNT=500
+MIN_FILE_COUNT=300
 ZIP_LEVEL="${ZIP_COMPRESSION_LEVEL:-3}"
 TIMING_LOG="dist/zip-timing.log"
 
@@ -105,7 +105,7 @@ if [[ "$DIST_CLEAN" -eq 1 ]]; then
 fi
 
 rm -f "$OUTPUT" "$MANIFEST_TXT" "$MANIFEST_JSON" "$HASH_FILE" "$PROVENANCE_JSON" "$ATTESTATION_JSON"
-STAGING_DIR="$(mktemp -d "/tmp/infra-release-${OUTPUT_BASE}.XXXXXX")"
+STAGING_DIR="$(mktemp -d "/tmp/r-observe-release-${OUTPUT_BASE}.XXXXXX")"
 
 t0_collect=$(date +%s)
 ./scripts/package/package-file-list.sh > "$TMP_RAW"
@@ -173,7 +173,7 @@ GIT_HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 GIT_STATUS_SHA="$(git status --short 2>/dev/null | sha256sum | awk '{print $1}')"
 cat > "$PROVENANCE_JSON" <<EOF
 {
-  "schema": "infra.release.provenance.v1",
+  "schema": "r-observe.release.provenance.v1",
   "generated_at": "$DATE_UTC",
   "source_date_epoch": $SOURCE_DATE_EPOCH,
   "git_head": "$GIT_HEAD",
@@ -189,7 +189,7 @@ EOF
 ATTESTATION_SHA="$(sha256sum "$PROVENANCE_JSON" "$MANIFEST_JSON" "$MANIFEST_TXT" | sha256sum | awk '{print $1}')"
 cat > "$ATTESTATION_JSON" <<EOF
 {
-  "schema": "infra.release.attestation.v1",
+  "schema": "r-observe.release.attestation.v1",
   "generated_at": "$DATE_UTC",
   "artifact": "$OUTPUT",
   "artifact_sha256": "$ZIP_SHA",

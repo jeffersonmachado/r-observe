@@ -57,6 +57,7 @@ section "Serviços esperados"
 
 EXPECTED_SERVICES=(
   "r-observe-postgres" "r-observe-redis"
+  "r-observe-db-bootstrap"
   "r-observe-api" "r-observe-worker"
   "r-observe-ai" "r-observe-agent" "r-observe-discovery"
   "r-observe-icinga2" "r-observe-icingadb" "r-observe-icingaweb2" "r-observe-icinga-redis"
@@ -81,7 +82,7 @@ EXPECTED_VOLUMES=(
   "r-observe-postgres-data" "r-observe-redis-data"
   "r-observe-icinga2-data"  "r-observe-icingaweb2-data" "r-observe-icingadb-data"
   "r-observe-prometheus-data" "r-observe-loki-data" "r-observe-grafana-data"
-  "observe-evidence" "observe-replays" "observe-logs" "observe-config"
+  "observe-evidence" "observe-replays" "observe-logs"
 )
 
 for vol in "${EXPECTED_VOLUMES[@]}"; do
@@ -109,6 +110,29 @@ done
 section "Validação de segurança"
 
 COMPOSE_FULL=$(docker compose -f "$COMPOSE_FILE" $COMPOSE_ARGS $PROFILE_ARGS config 2>/dev/null)
+
+if echo "$COMPOSE_FULL" | grep -Eq '^[[:space:]]*image:[[:space:]]+[^[:space:]]*:latest([[:space:]]|$)'; then
+  fail "Compose contém imagem com tag flutuante latest"
+else
+  pass "Nenhuma imagem usa tag flutuante latest"
+fi
+
+UNPINNED_IMAGES=$(grep -E '^[[:space:]]+image:' "$COMPOSE_FILE" | grep -v '@sha256:' || true)
+if [ -n "$UNPINNED_IMAGES" ]; then
+  fail "Compose contém imagem externa sem digest imutável"
+else
+  pass "Todas as imagens externas estão fixadas por digest"
+fi
+
+UNPINNED_BASES=$(find "$ROOT_DIR/r-observe" "$ROOT_DIR/observe" \
+  -path '*/node_modules/*' -prune -o \
+  -name Dockerfile -type f -exec grep -H -E '^FROM ' {} \; \
+  | grep -v -E '@sha256:|^.*:FROM scratch([[:space:]]|$)' || true)
+if [ -n "$UNPINNED_BASES" ]; then
+  fail "Dockerfile contém imagem-base sem digest imutável"
+else
+  pass "Todas as imagens-base dos Dockerfiles estão fixadas por digest"
+fi
 
 # Banco não deve ter porta exposta
 if echo "$COMPOSE_FULL" | grep -A5 "container_name: r-observe-postgres" | grep -q "published:"; then

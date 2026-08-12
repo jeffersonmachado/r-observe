@@ -97,15 +97,15 @@ if [[ -f "${ENV_FILE}" ]]; then
       ICINGA_API_USER)       [[ -z "${ICINGA_API_USER:-}"       ]] && ICINGA_API_USER="$val"       ;;
       ICINGA_API_PASSWORD)   [[ -z "${ICINGA_API_PASSWORD:-}"   ]] && ICINGA_API_PASSWORD="$val"   ;;
       ICINGA_CONTAINER)      [[ -z "${ICINGA_CONTAINER:-}"      ]] && ICINGA_CONTAINER="$val"      ;;
-      JWT_SECRET)[[ -z "${R_OBSERVE_TOKEN:-}" ]] && [[ "${_TOKEN_FROM_ARG}" == "false" ]] && R_OBSERVE_TOKEN="$val" ;;
+      JWT_PRIVATE_KEY_FILE) [[ -z "${JWT_PRIVATE_KEY_FILE:-}" ]] && JWT_PRIVATE_KEY_FILE="$val" ;;
       R_OBSERVE_PUBLIC_URL)  [[ -z "${R_OBSERVE_URL:-http://localhost:3080}" ]] && R_OBSERVE_URL="$val" ;;
     esac
   done < "${ENV_FILE}"
 fi
 
-# Converte raw secret em JWT (quando lido do env, não de --token)
-if [[ "${_TOKEN_FROM_ARG}" == "false" ]] && [[ -n "${R_OBSERVE_TOKEN}" ]]; then
-  R_OBSERVE_TOKEN="$(JWT_SECRET="${R_OBSERVE_TOKEN}" node "${SCRIPT_DIR}/jwt-sign.js" discover-hosts 30m)"
+# Gera token RS256 efêmero quando --token não foi informado.
+if [[ "${_TOKEN_FROM_ARG}" == "false" ]]; then
+  R_OBSERVE_TOKEN="$(JWT_PRIVATE_KEY_FILE="${JWT_PRIVATE_KEY_FILE:-}" JWT_ROLE=admin JWT_SCOPE='api:access api:inventory:write' node "${SCRIPT_DIR}/jwt-sign.js" discover-hosts 30m)"
 fi
 
 if [[ "${MODE}" != "r-observe" ]]; then
@@ -418,7 +418,7 @@ print(json.dumps({
   case "${http_code}" in
     201) ok "Registrado via R-Observe: ${name} (${ip})" ;;
     200) ok "Atualizado via R-Observe: ${name} (${ip})" ;;
-    401) warn "Token inválido para R-Observe (401). Use --token ou defina JWT_SECRET." ;;
+    401) warn "Token inválido para R-Observe (401). Use --token ou configure JWT_PRIVATE_KEY_FILE." ;;
     *)   warn "R-Observe respondeu HTTP ${http_code} para ${name}" ;;
   esac
 }
@@ -739,7 +739,7 @@ main() {
       fi
       ;;
     r-observe)
-      [[ -z "${R_OBSERVE_TOKEN}" ]] && die "Token não encontrado. Use --token ou defina JWT_SECRET em .env.observe."
+      [[ -z "${R_OBSERVE_TOKEN}" ]] && die "Token não encontrado. Use --token ou configure JWT_PRIVATE_KEY_FILE."
       log "Registrando hosts via R-Observe API (${R_OBSERVE_URL})..."
       echo ""
       for ip in "${!HOSTS_DATA[@]}"; do

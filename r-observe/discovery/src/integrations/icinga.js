@@ -1,7 +1,18 @@
 'use strict';
 
 const https = require('https');
+const fs = require('fs');
 const { log } = require('../utils/logger');
+const { isValidPort } = require('../validators');
+
+function tlsOptions(env = process.env) {
+  const rejectUnauthorized = env.ICINGA_API_TLS_REJECT_UNAUTHORIZED !== 'false';
+  const options = { rejectUnauthorized };
+  if (env.ICINGA_API_CA_FILE) {
+    options.ca = fs.readFileSync(env.ICINGA_API_CA_FILE);
+  }
+  return options;
+}
 
 function request(method, path, body = null) {
   return new Promise((resolve, reject) => {
@@ -17,7 +28,7 @@ function request(method, path, body = null) {
       port: parsed.port || 5665,
       path: parsed.pathname + parsed.search,
       method,
-      rejectUnauthorized: false,
+      ...tlsOptions(),
       headers: {
         Accept: 'application/json',
         Authorization: `Basic ${auth}`,
@@ -49,6 +60,18 @@ function safeServiceName(name) {
 
 function safeGroupName(name) {
   return String(name || 'grp-unknown').replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 128);
+}
+
+// Escapa valores não confiáveis antes de inseri-los na DSL do Icinga.
+// Quebras de linha precisam permanecer dentro da string, nunca virar diretivas.
+function icingaString(value) {
+  return String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
 }
 
 const IANA_SERVICE_MAP = {
@@ -105,13 +128,13 @@ function renderHostConfig(hosts) {
     const address = dockerName || h.hostname || h.primary_ip || '127.0.0.1';
     lines.push(`object Host \"${host}\" {`);
     lines.push(`  import \"generic-host\"`);
-    lines.push(`  address = \"${address}\"`);
-    lines.push(`  display_name = \"${(h.display_name || host).replace(/"/g, '\\"')}\"`);
+    lines.push(`  address = \"${icingaString(address)}\"`);
+    lines.push(`  display_name = \"${icingaString(h.display_name || host)}\"`);
     lines.push(`  vars.discovered = true`);
-    lines.push(`  vars.discovery_state = \"${h.lifecycle_state || 'approved'}\"`);
-    if (h.vendor)  lines.push(`  vars.vendor = \"${String(h.vendor).replace(/"/g, '\\"')}\"`);
-    if (h.product) lines.push(`  vars.product = \"${String(h.product).replace(/"/g, '\\"')}\"`);
-    if (h.asset_type) lines.push(`  vars.asset_type = \"${h.asset_type}\"`);
+    lines.push(`  vars.discovery_state = \"${icingaString(h.lifecycle_state || 'approved')}\"`);
+    if (h.vendor)  lines.push(`  vars.vendor = \"${icingaString(h.vendor)}\"`);
+    if (h.product) lines.push(`  vars.product = \"${icingaString(h.product)}\"`);
+    if (h.asset_type) lines.push(`  vars.asset_type = \"${icingaString(h.asset_type)}\"`);
     lines.push('}');
     lines.push('');
   }
@@ -127,8 +150,8 @@ function renderServiceConfig(hosts) {
     const services = h.services || [];
 
     for (const svc of services) {
-      const port = svc.port;
-      if (!port) continue;
+      if (!isValidPort(svc.port)) continue;
+      const port = Number(svc.port);
       const proto = (svc.protocol || 'tcp').toLowerCase();
       const meta = resolveServiceMeta(port, proto);
       const svcKey = `${host}:${meta.name}`;
@@ -482,6 +505,8 @@ async function registerApprovedAsset(asset) {
 }
 
 async function registerService(hostName, port, protocol) {
+  if (!isValidPort(port)) throw new Error('Invalid Icinga service port');
+  port = Number(port);
   const host = safeHostName(hostName);
   const meta = resolveServiceMeta(port, protocol);
   const svcName = safeServiceName(`${meta.name}-${port}`);
@@ -546,7 +571,10 @@ async function syncDiscoveredToIcinga({ tenant, assets, edges }) {
   for (const a of approved) {
     const services = a.services || [];
     for (const svc of services) {
-      if (!svc.port) continue;
+      if (!isValidPort(svc.port)) {
+        log('warn', 'Icinga sync skipped invalid service port', { asset: safeHostName(a.asset_name) });
+        continue;
+      }
       const out = await registerService(a.asset_name, svc.port, svc.protocol);
       if (out.ok) servicesSynced++;
     }
@@ -584,4 +612,11 @@ async function syncDiscoveredToIcinga({ tenant, assets, edges }) {
   };
 }
 
-module.exports = { registerApprovedAsset, syncDiscoveredToIcinga };
+module.exports = {
+  registerApprovedAsset,
+  syncDiscoveredToIcinga,
+  tlsOptions,
+  icingaString,
+  renderHostConfig,
+  renderServiceConfig,
+};

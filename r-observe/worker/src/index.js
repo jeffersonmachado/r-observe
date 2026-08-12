@@ -7,6 +7,7 @@ const icinga      = require('./icinga');
 const { createDbClient } = require('./db');
 const { createEventProcessor } = require('./services/event-processor');
 const { createLifecycle } = require('../shared/lifecycle');
+const { runWithTenant } = require('../shared/tenant-context');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT           = parseInt(process.env.PORT || '3000', 10);
@@ -81,15 +82,20 @@ async function pollQueues() {
   const result = await redis.blpop(...QUEUE_KEYS, 1);
   if (!result) return;
   const [key, raw] = result;
-  if (key === 'observe:remediation:execute') {
-    await dispatchApprovedRemediation(raw);
-  } else if (key === 'observe:scan:results') {
-    await processScanResults(raw);
-  } else {
-    await processEvent(raw);
-    lastProcessedAt = new Date().toISOString();
-    processedCount++;
-  }
+  let payload = {};
+  try { payload = JSON.parse(raw); } catch (_) { /* processor registra payload inválido */ }
+  const tenantId = payload.tenant_id || payload.tenantId || 'default';
+  await runWithTenant(tenantId, async () => {
+    if (key === 'observe:remediation:execute') {
+      await dispatchApprovedRemediation(raw);
+    } else if (key === 'observe:scan:results') {
+      await processScanResults(raw);
+    } else {
+      await processEvent(raw);
+      lastProcessedAt = new Date().toISOString();
+      processedCount++;
+    }
+  });
 }
 
 async function startWorker() {
@@ -141,6 +147,12 @@ app.get('/metrics', (_req, res) => {
     `r_observe_remediations_total{outcome="approved_by_human"} ${rem.approved}`,
     `r_observe_remediations_total{outcome="execution_success"} ${rem.success}`,
     `r_observe_remediations_total{outcome="execution_failed"}  ${rem.failed}`,
+    `# HELP r_observe_queue_depth Current queue depth`,
+    `# TYPE r_observe_queue_depth gauge`,
+    `r_observe_queue_depth{queue="events"} 0`,
+    `r_observe_queue_depth{queue="icinga_events"} 0`,
+    `r_observe_queue_depth{queue="remediation"} 0`,
+    `r_observe_queue_depth{queue="scan_results"} 0`,
   ].join('\n') + '\n');
 });
 

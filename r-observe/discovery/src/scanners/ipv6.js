@@ -4,13 +4,13 @@
 // Suporte completo a IPv6: ping6, expansao de prefixos, reverse DNS,
 // TCP connect via IPv6 e integracao com o pipeline de descoberta.
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const net = require('net');
 const dns = require('dns').promises;
 const { log } = require('../utils/logger');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Valida endereco IPv6.
 function isValidIPv6(ip) {
@@ -26,14 +26,14 @@ function isValidIPv6(ip) {
 
 // Ping IPv6 (ping6).
 async function ping6Host(host, opts = {}) {
-  const count = opts.count || 1;
-  const timeout = opts.timeout || 1;
+  if (!isValidIPv6(host)) return { alive: false, host, family: 6 };
+  const count = Math.max(1, Math.min(5, Number(opts.count) || 1));
+  const timeout = Math.max(1, Math.min(10, Number(opts.timeout) || 1));
 
   try {
     const start = Date.now();
-    const escaped = host.includes(':') && !host.startsWith('[') ? host : host;
-    const { stdout } = await execAsync(
-      `ping6 -c ${count} -W ${timeout} -n ${escaped}`,
+    const { stdout } = await execFileAsync(
+      'ping6', ['-c', String(count), '-W', String(timeout), '-n', host],
       { timeout: (timeout + 2) * 1000 }
     );
     const elapsed = Date.now() - start;
@@ -180,7 +180,7 @@ async function reverseDns6(ip) {
 async function discoverNdpTable() {
   const entries = [];
   try {
-    const { stdout } = await execAsync('ip -6 neigh show', { timeout: 5000 });
+    const { stdout } = await execFileAsync('ip', ['-6', 'neigh', 'show'], { timeout: 5000 });
     for (const line of stdout.trim().split('\n')) {
       if (!line.trim()) continue;
       const parts = line.trim().split(/\s+/);
@@ -205,7 +205,7 @@ async function discoverIPv6Subnets() {
 
   // Interfaces
   try {
-    const { stdout } = await execAsync('ip -6 -o addr show', { timeout: 5000 });
+    const { stdout } = await execFileAsync('ip', ['-6', '-o', 'addr', 'show'], { timeout: 5000 });
     for (const line of stdout.split('\n')) {
       const m = line.match(/inet6\s+([0-9a-f:]+\/\d+)/i);
       if (!m) continue;
@@ -217,7 +217,7 @@ async function discoverIPv6Subnets() {
 
   // Rotas
   try {
-    const { stdout } = await execAsync('ip -6 route show', { timeout: 5000 });
+    const { stdout } = await execFileAsync('ip', ['-6', 'route', 'show'], { timeout: 5000 });
     for (const line of stdout.split('\n')) {
       const m = line.match(/([0-9a-f:]+\/\d+)/i);
       if (!m) continue;

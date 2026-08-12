@@ -22,16 +22,6 @@ done
 # Remove icingadb do features-enabled (usamos conf.d gerado via template)
 rm -f /etc/icinga2/features-enabled/icingadb.conf 2>/dev/null || true
 
-if [ -n "${ICINGA_ROOT_PASSWORD:-}" ]; then
-  cat >> "${CONF_DIR}/api-users.conf" <<EOF
-
-object ApiUser "root" {
-  password = "${ICINGA_ROOT_PASSWORD}"
-  permissions = ["*"]
-}
-EOF
-fi
-
 API_CONF="/etc/icinga2/features-enabled/api.conf"
 if [ -f "${API_CONF}" ]; then
   sed -i 's/accept_config = false/accept_config = true/' "${API_CONF}"

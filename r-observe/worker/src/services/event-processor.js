@@ -1,7 +1,8 @@
 'use strict';
 
 const { v4: uuidv4 } = require('uuid');
-const { signInternalToken } = require('../jwt');
+const { signInternalToken } = require('@results/auth');
+const { getTenantId } = require('../shared/tenant-context');
 
 /**
  * Processador de eventos do worker: incidentes, remediações, análise proativa.
@@ -23,7 +24,14 @@ function createEventProcessor({ db, remediation, icinga, log, config }) {
   async function callAI(incident, context) {
     if (!AI_ENABLED) return null;
     try {
-      const jwt = signInternalToken({ sub: 'r-observe-worker', service: 'worker' });
+      const jwt = signInternalToken({
+        sub: 'r-observe-worker',
+        service: 'worker',
+        role: 'operator',
+        aud: 'ai',
+        scope: ['ai:access', 'ai:explain'],
+        tenant_id: getTenantId(),
+      });
       const resp = await fetch(`${AI_SERVICE_URL}/ai/explain`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-internal-token': jwt },
@@ -82,7 +90,7 @@ function createEventProcessor({ db, remediation, icinga, log, config }) {
     const r = await db.query(
       `INSERT INTO observe_hosts (id, name, address, metadata, updated_at)
        VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (name)
+       ON CONFLICT (tenant_id, name)
        DO UPDATE SET address = EXCLUDED.address, metadata = EXCLUDED.metadata, updated_at = NOW()
        RETURNING id, (xmax = 0) AS inserted`,
       [uuidv4(), name, address, JSON.stringify(metadata)]
@@ -179,14 +187,23 @@ function createEventProcessor({ db, remediation, icinga, log, config }) {
 
     log('debug', 'Processing event', { type: event.type, source: event.source });
 
-    if (event.type === 'host.recovery' || event.type === 'service.recovery') {
+    if (event.type === 'host.recovery' || event.type === 'service.recovery' || event.type === 'check.recovery') {
       const hostName = event.host || event.hostname || 'unknown';
       const hostId = await upsertHost(hostName, event.address || null, { source: event.source });
-      const closed = await db.query(
-        `UPDATE observe_incidents SET status = 'resolved', resolved_at = NOW(), updated_at = NOW()
-         WHERE host_id = $1 AND status = 'open' RETURNING id`,
-        [hostId]
-      );
+      const checkTitle = event.type === 'check.recovery'
+        ? `[CHECK.FAILED] ${hostName} / ${event.target || 'unknown'}`
+        : null;
+      const closed = checkTitle
+        ? await db.query(
+          `UPDATE observe_incidents SET status = 'resolved', resolved_at = NOW(), updated_at = NOW()
+           WHERE host_id = $1 AND status = 'open' AND title = $2 RETURNING id`,
+          [hostId, checkTitle]
+        )
+        : await db.query(
+          `UPDATE observe_incidents SET status = 'resolved', resolved_at = NOW(), updated_at = NOW()
+           WHERE host_id = $1 AND status = 'open' RETURNING id`,
+          [hostId]
+        );
       if (closed.rowCount > 0) {
         log('info', 'Incidents resolved via recovery', { hostName, count: closed.rowCount });
       }
@@ -208,20 +225,35 @@ function createEventProcessor({ db, remediation, icinga, log, config }) {
 
     const hostName = event.host || event.hostname || 'unknown';
     const hostId = await upsertHost(hostName, event.address || null, { source: event.source });
+    const incidentSubject = event.service || event.target || event.filesystem || null;
+    const title = `[${event.type.toUpperCase()}] ${hostName}${incidentSubject ? ' / ' + incidentSubject : ''}`;
 
     const existing = await db.query(
       `SELECT id FROM observe_incidents
-       WHERE host_id = $1 AND status = 'open' AND source_event_id = $2`,
-      [hostId, event.id || null]
+       WHERE host_id = $1 AND status = 'open'
+         AND (source_event_id = $2 OR title = $3)
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [hostId, event.id || null, title]
     );
     if (existing.rowCount > 0) {
-      log('debug', 'Incident already exists, skipping', { incident_id: existing.rows[0].id });
-      return;
+      const existingId = existing.rows[0].id;
+      await db.query(
+        `UPDATE observe_incidents
+         SET updated_at = NOW(),
+             metadata = metadata || jsonb_build_object(
+               'last_event', $1::jsonb,
+               'repeat_count', COALESCE((metadata->>'repeat_count')::integer, 0) + 1
+             )
+         WHERE id = $2`,
+        [JSON.stringify(event), existingId]
+      );
+      log('debug', 'Incident recurrence coalesced', { incident_id: existingId, title });
+      return { processed: false, duplicate: true, incident_id: existingId };
     }
 
     const incidentId = uuidv4();
     const severity = event.severity || (event.type === 'host.down' ? 'critical' : 'warning');
-    const title = `[${event.type.toUpperCase()}] ${hostName}${event.service ? ' / ' + event.service : ''}`;
 
     await db.query(
       `INSERT INTO observe_incidents

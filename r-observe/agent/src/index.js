@@ -10,7 +10,7 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const { createLifecycle } = require('../shared/lifecycle');
-const { signInternalToken } = require('./jwt');
+const { signInternalToken } = require('@results/auth');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -92,6 +92,7 @@ try {
 let lastCheckAt = null;
 let checkCount = 0;
 let eventsSent = 0;
+const checkStates = new Map();
 
 // ─── Send event to API ────────────────────────────────────────────────────────
 async function sendEvent(type, data) {
@@ -100,7 +101,7 @@ async function sendEvent(type, data) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }),
+        'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'operator', aud: 'api', scope: ['api:access', 'api:events:write'] }),
       },
       body: JSON.stringify({
         type,
@@ -122,13 +123,27 @@ async function sendEvent(type, data) {
   }
 }
 
+async function publishCheckState(key, ok, failure) {
+  const previous = checkStates.get(key);
+  checkStates.set(key, ok);
+  if (!ok && previous !== false) {
+    await sendEvent(failure.type, failure.data);
+  } else if (ok && previous === false) {
+    await sendEvent('check.recovery', {
+      check: failure.data.check,
+      target: failure.data.target,
+      message: `${failure.data.check.toUpperCase()} check recuperado: ${failure.data.target}`,
+    });
+  }
+}
+
 async function postInventory(containers) {
   try {
     const resp = await fetch(`${API_URL}${API_BASE_PATH}/inventory/docker`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }),
+        'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin', aud: 'api', scope: ['api:access', 'api:inventory:write'] }),
       },
       body: JSON.stringify({
         agent_id: AGENT_ID,
@@ -286,26 +301,35 @@ async function checkDisk() {
 
 // Check: HTTP health de um endpoint
 async function checkHTTP(url, label) {
+  const target = label || url;
+  const key = `http:${target}`;
   try {
     const resp = await fetch(url, {
       signal: AbortSignal.timeout(5000),
-      headers: { 'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }) },
     });
     if (!resp.ok) {
-      await sendEvent('check.failed', {
-        severity: 'warning',
-        check: 'http',
-        target: label || url,
-        status_code: resp.status,
-        message: `HTTP check falhou: ${url} retornou ${resp.status}`,
+      await publishCheckState(key, false, {
+        type: 'check.failed',
+        data: {
+          severity: 'warning',
+          check: 'http',
+          target,
+          status_code: resp.status,
+          message: `HTTP check falhou: ${url} retornou ${resp.status}`,
+        },
       });
+    } else {
+      await publishCheckState(key, true, { type: 'check.failed', data: { check: 'http', target } });
     }
   } catch (e) {
-    await sendEvent('check.failed', {
-      severity: 'warning',
-      check: 'http',
-      target: label || url,
-      message: `HTTP check inacessível: ${url} — ${e.message}`,
+    await publishCheckState(key, false, {
+      type: 'check.failed',
+      data: {
+        severity: 'warning',
+        check: 'http',
+        target,
+        message: `HTTP check inacessível: ${url} — ${e.message}`,
+      },
     });
   }
 }
@@ -356,7 +380,7 @@ async function postStaticHosts() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin' }),
+          'x-internal-token': signInternalToken({ sub: 'r-observe-agent', service: 'agent', role: 'admin', aud: 'api', scope: ['api:access', 'api:inventory:write'] }),
         },
         body: JSON.stringify({
           name: h.name,

@@ -31,7 +31,7 @@ function parseArgs(argv) {
     else if (token === '--runtime') args.runtime = true;
     else throw new Error(`Argumento desconhecido: ${token}`);
   }
-  if (!args.zip) throw new Error('Uso: --zip <dist/infra.zip> [--root <workspace>] [--report <json>]');
+  if (!args.zip) throw new Error('Uso: --zip <dist/r-observe.zip> [--root <workspace>] [--report <json>]');
   return args;
 }
 
@@ -63,7 +63,7 @@ function readZipText(zipPath, entry) {
 }
 
 function extractZip(zipPath) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'infra-validate-extract-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r-observe-validate-extract-'));
   run('unzip', ['-q', zipPath, '-d', dir]);
   return dir;
 }
@@ -148,9 +148,9 @@ function main() {
     warnings,
   };
 
-  if (!fs.existsSync(zipPath)) errors.push(`infra.zip ausente: ${path.relative(rootDir, zipPath)}`);
-  if (!fs.existsSync(manifestTxtPath)) errors.push(`infra-manifest.txt ausente: ${path.relative(rootDir, manifestTxtPath)}`);
-  if (!fs.existsSync(manifestJsonPath)) errors.push(`infra-manifest.json ausente: ${path.relative(rootDir, manifestJsonPath)}`);
+  if (!fs.existsSync(zipPath)) errors.push(`r-observe.zip ausente: ${path.relative(rootDir, zipPath)}`);
+  if (!fs.existsSync(manifestTxtPath)) errors.push(`r-observe-manifest.txt ausente: ${path.relative(rootDir, manifestTxtPath)}`);
+  if (!fs.existsSync(manifestJsonPath)) errors.push(`r-observe-manifest.json ausente: ${path.relative(rootDir, manifestJsonPath)}`);
   if (errors.length > 0) {
     result.status = 'red';
     writeReport(reportPath, result);
@@ -165,7 +165,7 @@ function main() {
 
   const manifestLines = sortedUnique(parseManifestText(manifestTxtPath));
   const manifestRawLines = parseManifestText(manifestTxtPath);
-  if (manifestLines.length !== manifestRawLines.length) errors.push('infra-manifest.txt contem linhas duplicadas');
+  if (manifestLines.length !== manifestRawLines.length) errors.push('r-observe-manifest.txt contem linhas duplicadas');
 
   const manifestJson = JSON.parse(fs.readFileSync(manifestJsonPath, 'utf8'));
   const zipSha = sha256File(zipPath);
@@ -174,7 +174,7 @@ function main() {
 
   const staleInside = zipEntries.filter((entry) => {
     const base = path.basename(entry);
-    return /^infra(-release)?-manifest\.(txt|json)$/i.test(base)
+    return /^r-observe(-release)?-manifest\.(txt|json)$/i.test(base)
       || /^release-(gate|audit|smoke)-report\.json$/i.test(base)
       || /enterprise-validate\.json$/i.test(base);
   });
@@ -278,7 +278,7 @@ function main() {
   }
   assertExecutableInZip(zipPath, 'scripts/discovery/discovery-enterprise-smoke.sh', errors);
 
-  const internalManifestEntries = zipEntries.filter((entry) => /(^|\/)infra(-release)?-manifest\.(txt|json)$/i.test(entry));
+  const internalManifestEntries = zipEntries.filter((entry) => /(^|\/)r-observe(-release)?-manifest\.(txt|json)$/i.test(entry));
   for (const entry of internalManifestEntries) {
     if (entry.endsWith('.txt')) {
       const internal = readZipText(zipPath, entry);
@@ -310,24 +310,24 @@ function main() {
   }
 
   const allowedDist = new Set([
-    'infra.zip',
-    'infra.zip.sha256',
-    'infra-manifest.txt',
-    'infra-manifest.json',
-    'infra-provenance.json',
-    'infra-attestation.json',
-    'infra-zip.log',
-    'infra-validate.log',
-    'infra-enterprise-validate.json',
-    'infra-release.zip',
-    'infra-release.zip.sha256',
-    'infra-release-manifest.txt',
-    'infra-release-manifest.json',
-    'infra-release-provenance.json',
-    'infra-release-attestation.json',
-    'infra-release-zip.log',
-    'infra-release-validate.log',
-    'infra-release-enterprise-validate.json',
+    'r-observe.zip',
+    'r-observe.zip.sha256',
+    'r-observe-manifest.txt',
+    'r-observe-manifest.json',
+    'r-observe-provenance.json',
+    'r-observe-attestation.json',
+    'r-observe-zip.log',
+    'r-observe-validate.log',
+    'r-observe-enterprise-validate.json',
+    'r-observe-release.zip',
+    'r-observe-release.zip.sha256',
+    'r-observe-release-manifest.txt',
+    'r-observe-release-manifest.json',
+    'r-observe-release-provenance.json',
+    'r-observe-release-attestation.json',
+    'r-observe-release-zip.log',
+    'r-observe-release-validate.log',
+    'r-observe-release-enterprise-validate.json',
     'zip-timing.log',
     'release-timing.log',
     'release-gate-report.json',

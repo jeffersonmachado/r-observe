@@ -21,7 +21,7 @@
 
 const os = require('os');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 /**
  * Lê o default gateway do /proc/net/route (Linux).
@@ -68,9 +68,10 @@ function readProcNetRoute() {
  */
 function readIpRoute() {
   try {
-    const output = execSync('ip -4 route show default 2>/dev/null', {
+    const output = execFileSync('ip', ['-4', 'route', 'show', 'default'], {
       encoding: 'utf8',
       timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
     const gateways = [];
     for (const line of output.trim().split('\n').filter(Boolean)) {
@@ -90,7 +91,12 @@ function readIpRoute() {
  * Coleta todos os IPs locais de todas as interfaces (não-loopback).
  */
 function getLocalIps() {
-  const interfaces = os.networkInterfaces();
+  let interfaces;
+  try {
+    interfaces = os.networkInterfaces();
+  } catch {
+    return [];
+  }
   const ips = new Set();
 
   for (const [name, addrs] of Object.entries(interfaces)) {

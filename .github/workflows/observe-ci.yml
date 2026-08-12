@@ -1,0 +1,164 @@
+name: observe-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observe-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-tests:
+    name: Test ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: auth
+            path: packages/auth
+          - module: api
+            path: r-observe/api
+          - module: worker
+            path: r-observe/worker
+          - module: discovery
+            path: r-observe/discovery
+          - module: ai
+            path: r-observe/ai
+          - module: agent
+            path: r-observe/agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ${{ matrix.path }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix "${{ matrix.path }}"
+
+      - name: Run tests
+        run: npm test --prefix "${{ matrix.path }}"
+
+      - name: Audit production dependencies
+        run: npm audit --prefix "${{ matrix.path }}" --omit=dev --audit-level=high
+
+  stack-validation:
+    name: Validate stack definition
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Prepare validation configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.observe.example "$RUNNER_TEMP/.env.observe"
+          sed -i 's/CHANGE_ME[^[:space:]]*/ci_validation_value/g' "$RUNNER_TEMP/.env.observe"
+
+      - name: Validate Compose and container security
+        run: ENV_FILE="$RUNNER_TEMP/.env.observe" npm run observe:release-check
+
+      - name: Audit workspace dependencies
+        shell: bash
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit --prefix r-observe --omit=dev --audit-level=high
+
+      - name: Validate installer
+        run: npm run observe:installer:check
+
+  security-scan:
+    name: Trivy repository scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Scan vulnerabilities, misconfigurations and secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.73.0
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+  docker-smoke:
+    name: Docker incident smoke
+    runs-on: ubuntu-latest
+    needs:
+      - node-tests
+      - stack-validation
+      - security-scan
+    timeout-minutes: 25
+    env:
+      COMPOSE_FILE: docker-compose.observe.yml
+      CI_ENV_FILE: ${{ github.workspace }}/.env.observe.ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Prepare ephemeral configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.observe.example "$CI_ENV_FILE"
+          sed -i \
+            -e 's/^R_OBSERVE_AI_PROVIDER=.*/R_OBSERVE_AI_PROVIDER=mock/' \
+            -e 's/^OBSERVE_DB_PASSWORD=.*/OBSERVE_DB_PASSWORD=ci_observe_db_password/' \
+            -e 's/^OBSERVE_DB_APP_PASSWORD=.*/OBSERVE_DB_APP_PASSWORD=ci_observe_app_password/' \
+            -e 's/^OBSERVE_DB_EXPORTER_PASSWORD=.*/OBSERVE_DB_EXPORTER_PASSWORD=ci_observe_exporter_password/' \
+            -e 's/^ICINGADB_DB_PASSWORD=.*/ICINGADB_DB_PASSWORD=ci_icingadb_password/' \
+            -e 's/^OBSERVE_REDIS_PASSWORD=.*/OBSERVE_REDIS_PASSWORD=ci_redis_password/' \
+            -e 's/^OBSERVE_WEBHOOK_SECRET=.*/OBSERVE_WEBHOOK_SECRET=ci_webhook_secret/' \
+            -e 's/^ICINGA_API_PASSWORD=.*/ICINGA_API_PASSWORD=ci_icinga_api_password/' \
+            -e 's/^ICINGA_ROOT_PASSWORD=.*/ICINGA_ROOT_PASSWORD=ci_icinga_root_password/' \
+            -e 's/^ICINGAWEB_ADMIN_PASS=.*/ICINGAWEB_ADMIN_PASS=ci_icingaweb_password/' \
+            -e 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=ci_grafana_password/' \
+            -e 's/^OBSERVE_HTTP_CHECKS=.*/OBSERVE_HTTP_CHECKS=/' \
+            -e 's/^OBSERVE_TCP_CHECKS=.*/OBSERVE_TCP_CHECKS=/' \
+            "$CI_ENV_FILE"
+          JWT_KEY_DIR="$GITHUB_WORKSPACE/secrets" scripts/observe/jwt-keys.sh init
+
+      - name: Build and start smoke stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f "$COMPOSE_FILE" --env-file "$CI_ENV_FILE" \
+            --profile observe-core --profile observe-ai --profile r-observe-proxy \
+            up -d --build --wait --wait-timeout 180
+
+      - name: Run end-to-end incident smoke
+        run: ENV_FILE="$CI_ENV_FILE" npm run observe:smoke
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -f "$COMPOSE_FILE" --env-file "$CI_ENV_FILE" logs --no-color --tail=200
+
+      - name: Tear down smoke stack
+        if: always()
+        run: docker compose -f "$COMPOSE_FILE" --env-file "$CI_ENV_FILE" down -v --remove-orphans

@@ -95,6 +95,15 @@ async function countRecentScans(db, tenantId, siteId, edgeId) {
   }
 }
 
+async function countConcurrentScans(db, tenantId, siteId, edgeId) {
+  const r = await db.query(
+    `SELECT COUNT(*)::int AS cnt FROM observe_discovery_runs
+     WHERE tenant_id=$1 AND site_id=$2 AND edge_id=$3 AND status IN ('queued','running')`,
+    [String(tenantId), String(siteId || 'default-site'), String(edgeId || 'central')]
+  );
+  return r.rows[0]?.cnt || 0;
+}
+
 /**
  * Middleware factory: verifica quota antes da operação.
  *
@@ -108,7 +117,7 @@ function requireQuota(resource) {
     const edgeId = String(req.body?.edge_id || req.query?.edge_id || 'central');
 
     const quota = await getQuota(req._db || req.app?.locals?.db, tenantId);
-    if (!quota) return next(); // fail open
+    if (!quota) return _res.status(503).json({ error: 'Quota service unavailable' });
 
     req._quota = quota;
 
@@ -140,6 +149,10 @@ function requireQuota(resource) {
           break;
         }
         case 'scans': {
+          const concurrent = await countConcurrentScans(req._db || req.app?.locals?.db, tenantId, siteId, edgeId);
+          if (concurrent >= quota.max_concurrent_scans) {
+            return _res.status(429).json({ error: 'Quota exceeded', resource: 'concurrent_scans', current: concurrent, max: quota.max_concurrent_scans });
+          }
           const recent = await countRecentScans(req._db || req.app?.locals?.db, tenantId, siteId, edgeId);
           if (recent >= quota.max_scans_per_hour) {
             return _res.status(429).json({
@@ -155,11 +168,11 @@ function requireQuota(resource) {
       }
     } catch (e) {
       log('warn', 'Quota check failed', { err: e.message, resource, tenant_id: tenantId });
-      // fail open
+      return _res.status(503).json({ error: 'Quota check failed' });
     }
 
     next();
   };
 }
 
-module.exports = { requireQuota, getQuota, invalidateQuotaCache };
+module.exports = { requireQuota, getQuota, invalidateQuotaCache, countConcurrentScans };

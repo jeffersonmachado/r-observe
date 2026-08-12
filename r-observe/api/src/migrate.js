@@ -7,7 +7,7 @@ const { createDbClient } = require('./db');
 
 // Fluxo e contrato de migrations: docs/observe/migrations.md
 
-// ─── Custom storage: grava estado via client Sequelize ────────────────────────
+// ─── Custom storage: grava estado via client Sequelize ───────────────────────
 class MigrationStorage {
   constructor(db, table = 'schema_migrations') {
     this.db    = db;

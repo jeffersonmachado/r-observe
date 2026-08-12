@@ -85,7 +85,7 @@ done
 # Etapa 2: Serviços r-observe com hot reload
 echo "[dev-up] Subindo serviços r-observe com hot reload (node --watch)..."
 # shellcheck disable=SC2086
-docker compose "${COMPOSE_FILES[@]}" --env-file "$ENV_FILE" "${PROFILES[@]}" up -d $BUILD_ARG
+COMPOSE_PARALLEL_LIMIT=1 docker compose "${COMPOSE_FILES[@]}" --env-file "$ENV_FILE" "${PROFILES[@]}" up -d $BUILD_ARG
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"

@@ -8,7 +8,7 @@ datasources:
     isDefault: true
     uid: r-observe-prometheus
     jsonData:
-      timeInterval: "15s"
+      timeInterval: "60s"
 
   - name: Loki
     type: loki

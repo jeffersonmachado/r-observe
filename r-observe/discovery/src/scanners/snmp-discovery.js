@@ -1,9 +1,11 @@
 'use strict';
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { isValidHost } = require('../validators');
+const { isValidOid } = require('../mibs/snmp-walk');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 function shellEscape(value) {
   return `'${String(value || '').replace(/'/g, `'"'"'`)}'`;
@@ -276,37 +278,63 @@ function buildSnmpCommands(host, options = {}, oid = '1.3.6.1.2.1.1') {
   return commands;
 }
 
-async function runSnmpCmd(command, timeoutMs = 4000, execFn = execAsync) {
-  const wrapped = `timeout ${Math.max(1, Math.ceil(timeoutMs / 1000))}s ${command}`;
+function buildSnmpInvocations(host, options = {}, oid = '1.3.6.1.2.1.1') {
+  if (!isValidHost(host) || !isValidOid(oid)) return [];
+  const timeoutSec = Math.max(1, Math.min(60, Math.ceil((Number(options.timeoutMs) || 4000) / 1000)));
+  const version = String(options.version || process.env.DISCOVERY_SNMP_VERSION || '2c').toLowerCase();
+  const args = [];
+
+  if (version === '3') {
+    const user = options.user || process.env.DISCOVERY_SNMP_V3_USER;
+    const level = options.securityLevel || process.env.DISCOVERY_SNMP_V3_LEVEL || 'authNoPriv';
+    const authProto = options.authProtocol || process.env.DISCOVERY_SNMP_V3_AUTH_PROTO || 'SHA';
+    const authPass = options.authPassword || process.env.DISCOVERY_SNMP_V3_AUTH_PASS || '';
+    const privProto = options.privProtocol || process.env.DISCOVERY_SNMP_V3_PRIV_PROTO || 'AES';
+    const privPass = options.privPassword || process.env.DISCOVERY_SNMP_V3_PRIV_PASS || '';
+    if (!user || !['noAuthNoPriv', 'authNoPriv', 'authPriv'].includes(level)) return [];
+    if (!['SHA', 'SHA-224', 'SHA-256', 'SHA-384', 'SHA-512', 'MD5'].includes(authProto)) return [];
+    if (!['AES', 'AES-192', 'AES-256', 'DES'].includes(privProto)) return [];
+    args.push('-v3', '-l', level, '-u', String(user), '-t', String(timeoutSec), '-r', '0');
+    if (level !== 'noAuthNoPriv') {
+      if (!authPass) return [];
+      args.push('-a', authProto, '-A', String(authPass));
+    }
+    if (level === 'authPriv') {
+      if (!privPass) return [];
+      args.push('-x', privProto, '-X', String(privPass));
+    }
+  } else {
+    const community = options.community || process.env.DISCOVERY_SNMP_COMMUNITY || 'public';
+    args.push('-v', version === '1' ? '1' : '2c', '-c', String(community),
+      '-t', String(timeoutSec), '-r', '0');
+  }
+
+  args.push(host, oid);
+  return ['snmpbulkwalk', 'snmpwalk'].map(file => ({
+    file,
+    args: [...args],
+    display: `${file} [arguments redacted] ${host} ${oid}`,
+  }));
+}
+
+async function runSnmpCmd(invocation, timeoutMs = 4000, execFn = null) {
+  const display = typeof invocation === 'string' ? invocation : invocation.display;
   try {
-    const { stdout, stderr } = await execFn(wrapped);
-    return { ok: true, stdout: stdout || '', stderr: stderr || '', command: wrapped };
+    const result = execFn
+      ? await execFn(display, { timeout: timeoutMs })
+      : await execFileAsync(invocation.file, invocation.args, {
+        timeout: Math.max(1000, Number(timeoutMs) || 4000),
+        maxBuffer: 10 * 1024 * 1024,
+      });
+    return { ok: true, stdout: result.stdout || '', stderr: result.stderr || '', command: display };
   } catch (e) {
-    const failure = {
+    return {
       ok: false,
       stdout: e?.stdout || '',
       stderr: e?.stderr || e?.message || '',
       code: e?.code,
-      command: wrapped,
+      command: display,
     };
-
-    // Fallback for environments without GNU timeout.
-    if (/timeout: not found|command not found/i.test(failure.stderr)) {
-      try {
-        const { stdout, stderr } = await execFn(command, { timeout: timeoutMs });
-        return { ok: true, stdout: stdout || '', stderr: stderr || '', command };
-      } catch (inner) {
-        return {
-          ok: false,
-          stdout: inner?.stdout || '',
-          stderr: inner?.stderr || inner?.message || '',
-          code: inner?.code,
-          command,
-        };
-      }
-    }
-
-    return failure;
   }
 }
 
@@ -336,13 +364,13 @@ async function probeSnmpTarget(host, options = {}) {
   let lastErr = null;
 
   for (const { oid, label } of oidSets) {
-    const commands = buildSnmpCommands(host, options, oid);
+    const commands = buildSnmpInvocations(host, options, oid);
     if (!commands.length) continue;
 
     let oidSuccess = false;
     for (let attempt = 0; attempt <= retries && !oidSuccess; attempt++) {
       for (const command of commands) {
-        const out = await runSnmpCmd(command, timeoutMs, options.execFn || execAsync);
+        const out = await runSnmpCmd(command, timeoutMs, options.execFn || null);
         if (out.ok && out.stdout) {
           const parsed = parseSnmpOutput(out.stdout);
           // Merge interfaces (ifTable + ifXTable enriquecem)
@@ -405,6 +433,7 @@ async function probeSnmpTarget(host, options = {}) {
 module.exports = {
   parseSnmpOutput,
   buildSnmpCommands,
+  buildSnmpInvocations,
   runSnmpCmd,
   probeSnmpTarget,
 };

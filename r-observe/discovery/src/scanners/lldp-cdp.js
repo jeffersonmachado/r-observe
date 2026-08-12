@@ -10,11 +10,11 @@
 //
 // Requer: lldpd instalado no host (lldpcli) ou CAP_NET_RAW.
 
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { log } = require('../utils/logger');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // ── Via lldpd/lldpcli ────────────────────────────────────────────────────
 
@@ -23,9 +23,8 @@ async function discoverViaLldpd() {
 
   try {
     // lldpcli show neighbors details
-    const { stdout } = await execAsync(
-      'lldpcli show neighbors details 2>/dev/null',
-      { timeout: 10000 }
+    const { stdout } = await execFileAsync(
+      'lldpcli', ['show', 'neighbors', 'details'], { timeout: 10000 }
     );
 
     let current = null;
@@ -118,13 +117,14 @@ function parsePortId(value) {
 
 async function discoverViaTcpdump(durationSec = 15) {
   const neighbors = [];
+  const duration = Math.max(1, Math.min(60, Number(durationSec) || 15));
 
   try {
     // Captura LLDP (ether proto 0x88cc) e CDP (ether proto 0x2000) em todas as interfaces
-    const { stdout } = await execAsync(
-      `timeout ${durationSec} tcpdump -i any -nn -e -c 50 'ether proto 0x88cc or ether proto 0x2000' 2>/dev/null`,
-      { timeout: (durationSec + 5) * 1000 }
-    );
+    const { stdout } = await execFileAsync('tcpdump', [
+      '-i', 'any', '-nn', '-e', '-c', '50',
+      'ether proto 0x88cc or ether proto 0x2000',
+    ], { timeout: duration * 1000, killSignal: 'SIGTERM' });
 
     for (const line of stdout.split('\n')) {
       if (!line.trim() || line.includes('tcpdump:')) continue;

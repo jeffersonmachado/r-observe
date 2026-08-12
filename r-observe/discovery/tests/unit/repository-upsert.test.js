@@ -3,7 +3,32 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { upsertAsset } = require('../../src/engine/repository');
+const { completeRun, upsertAsset } = require('../../src/engine/repository');
+
+test('completeRun exige o mesmo tenant/site/edge do run', async () => {
+  let call;
+  const db = {
+    async query(sql, params) {
+      call = { sql, params };
+      return { rows: [], rowCount: 1 };
+    },
+  };
+  await completeRun(db, 'run-1', {
+    tenant_id: 'tenant-a', site_id: 'site-a', edge_id: 'edge-a',
+  }, 'completed', { assets: 2 });
+  assert.match(call.sql, /tenant_id = \$4 AND site_id = \$5 AND edge_id = \$6/);
+  assert.deepStrictEqual(call.params.slice(3), ['tenant-a', 'site-a', 'edge-a']);
+});
+
+test('completeRun falha fechado quando o run não pertence ao escopo', async () => {
+  const db = { query: async () => ({ rows: [], rowCount: 0 }) };
+  await assert.rejects(
+    completeRun(db, 'run-x', {
+      tenant_id: 'tenant-a', site_id: 'site-a', edge_id: 'edge-a',
+    }, 'failed', {}),
+    /not found in scope/
+  );
+});
 
 test('upsertAsset faz merge por identidade lógica quando asset_key muda', async () => {
   const calls = [];

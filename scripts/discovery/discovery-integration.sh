@@ -15,7 +15,6 @@ fi
 DISCOVERY_CONTAINER="r-observe-discovery"
 REDIS_CONTAINER="r-observe-redis"
 PG_CONTAINER="r-observe-postgres"
-_SECRET="${JWT_SECRET:-}"
 DB_USER="${OBSERVE_DB_USER:-observe}"
 DB_NAME="${OBSERVE_DB_NAME:-observedb}"
 
@@ -23,6 +22,10 @@ ok() { echo "[PASS] $1"; }
 ko() { echo "[FAIL] $1" >&2; FAIL=1; }
 
 FAIL=0
+
+redis_cli() {
+  docker exec -e REDISCLI_AUTH="${OBSERVE_REDIS_PASSWORD:-}" "$REDIS_CONTAINER" redis-cli "$@"
+}
 
 echo "[discovery:integration] Validando integração real"
 
@@ -35,40 +38,46 @@ if [[ "$FAIL" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ -z "$_SECRET" ]]; then
-  ko "JWT_SECRET ausente para integração"
-  exit 1
-fi
-TOKEN="$(node "${ROOT_DIR}/scripts/observe/jwt-sign.js" discovery-integration 15m)"
+TOKEN="$(JWT_AUDIENCE=discovery JWT_SCOPE='discovery:access discovery:write' node "${ROOT_DIR}/scripts/observe/jwt-sign.js" discovery-integration 15m)"
 
-# Enfileira scan explicitamente
-TASK='{"profile":"safe","trigger":"integration-test","targets":[{"address":"10.10.2.30","discovery_type":"ip"},{"address":"127.0.0.1","discovery_type":"ip"}]}'
-TMP_SCAN_RESULTS="$(mktemp)"
-set +e
-docker exec "$REDIS_CONTAINER" sh -lc "timeout 6 redis-cli --raw SUBSCRIBE observe:scan:results" > "$TMP_SCAN_RESULTS" 2>/dev/null &
-SUB_SCAN_PID=$!
-set -e
-docker exec "$REDIS_CONTAINER" redis-cli RPUSH observe:scan:network "$TASK" >/dev/null
-ok "scan enfileirado em observe:scan:network"
+# A integração da fila deve respeitar o modo real do serviço. Nunca acumula
+# jobs quando o consumidor está explicitamente desabilitado.
+QUEUE_ENABLED="$(docker exec "$DISCOVERY_CONTAINER" node -e 'fetch("http://127.0.0.1:3010/health").then(r=>r.json()).then(x=>process.stdout.write(String(Boolean(x.queue?.enabled))))' 2>/dev/null || echo false)"
+QUEUE_BEFORE="$(redis_cli LLEN observe:scan:network | tr -d '[:space:]')"
 
-sleep 1
-
-QUEUE_LEN="$(docker exec "$REDIS_CONTAINER" redis-cli LLEN observe:scan:network | tr -d '[:space:]')"
-if [[ "$QUEUE_LEN" =~ ^[0-9]+$ ]]; then
-  ok "fila observe:scan:network acessível (len=$QUEUE_LEN)"
+if [[ "$QUEUE_ENABLED" == "true" ]]; then
+  JOB_ID="$(node -e 'process.stdout.write(require("crypto").randomUUID())')"
+  TASK="{\"queue_job_id\":\"${JOB_ID}\",\"queue_attempt\":0,\"profile\":\"safe\",\"trigger\":\"integration-test\",\"tenant_id\":\"discovery-integration\",\"site_id\":\"integration\",\"edge_id\":\"${JOB_ID}\",\"targets\":[{\"address\":\"127.0.0.1\",\"discovery_type\":\"ip\"}]}"
+  TMP_SCAN_RESULTS="$(mktemp)"
+  set +e
+  docker exec -e REDISCLI_AUTH="${OBSERVE_REDIS_PASSWORD:-}" "$REDIS_CONTAINER" \
+    sh -lc "timeout 30 redis-cli --raw SUBSCRIBE observe:scan:results" > "$TMP_SCAN_RESULTS" 2>/dev/null &
+  SUB_SCAN_PID=$!
+  set -e
+  for _subscriber_wait in 1 2 3 4 5; do
+    SUBSCRIBERS="$(redis_cli PUBSUB NUMSUB observe:scan:results 2>/dev/null | awk 'NR == 2 { print $1 + 0 }')"
+    if [[ "${SUBSCRIBERS:-0}" -ge 1 ]]; then break; fi
+    sleep 1
+  done
+  redis_cli RPUSH observe:scan:network "$TASK" >/dev/null
+  ok "scan correlacionado enfileirado em observe:scan:network"
+  set +e
+  wait "$SUB_SCAN_PID"
+  set -e
+  if grep -q "$JOB_ID" "$TMP_SCAN_RESULTS"; then
+    ok "discovery publicou resultado do queue_job_id solicitado"
+  else
+    ko "resultado correlacionado ausente para queue_job_id"
+  fi
+  rm -f "$TMP_SCAN_RESULTS"
 else
-  ko "não foi possível ler observe:scan:network"
+  QUEUE_AFTER="$(redis_cli LLEN observe:scan:network | tr -d '[:space:]')"
+  if [[ "$QUEUE_BEFORE" =~ ^[0-9]+$ && "$QUEUE_AFTER" == "$QUEUE_BEFORE" ]]; then
+    ok "fila desabilitada respeitada sem criar backlog (len=$QUEUE_AFTER)"
+  else
+    ko "backlog mudou com fila desabilitada (${QUEUE_BEFORE:-?}->${QUEUE_AFTER:-?})"
+  fi
 fi
-
-set +e
-wait "$SUB_SCAN_PID"
-set -e
-if grep -q "observe:scan:results" "$TMP_SCAN_RESULTS"; then
-  ok "discovery publicou observe:scan:results"
-else
-  ko "observe:scan:results sem publicação"
-fi
-rm -f "$TMP_SCAN_RESULTS"
 
 check_table_count() {
   local table="$1"

@@ -54,7 +54,6 @@ _resolve_port() {
 }
 
 API_BASE="http://localhost:$(_resolve_port)/observe/api"
-_SECRET="${JWT_SECRET:-$(_get_env JWT_SECRET)}"
 ICINGA_USER="${ICINGA_API_USER:-$(_get_env ICINGA_API_USER)}"
 ICINGA_PASS="${ICINGA_API_PASSWORD:-$(_get_env ICINGA_API_PASSWORD)}"
 ICINGA_CONTAINER="r-observe-icinga2"
@@ -64,8 +63,7 @@ ICINGA_DB_USER="${ICINGADB_DB_USER:-$(_get_env ICINGADB_DB_USER)}"
 ICINGA_DB_NAME="${ICINGA_DB_NAME:-icingadb}"
 ICINGA_DB_USER="${ICINGA_DB_USER:-icingadb}"
 
-[[ -z "${_SECRET}" ]] && { echo "ERRO: JWT_SECRET não definido em .env.observe"; exit 1; }
-TOKEN="$(node "${SCRIPT_DIR}/jwt-sign.js" smoke-icinga 30m)"
+TOKEN="$(JWT_SCOPE='api:access api:events:write' node "${SCRIPT_DIR}/jwt-sign.js" smoke-icinga 30m)"
 [[ -z "${ICINGA_PASS}" ]] && { echo "ERRO: ICINGA_API_PASSWORD não definido em .env.observe"; exit 1; }
 
 # Identificador único para este smoke test (evita colisão com dados reais)

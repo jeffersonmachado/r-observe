@@ -1,13 +1,22 @@
 'use strict';
 
-const { signInternalToken } = require('../jwt');
+const { signInternalToken } = require('@results/auth');
+const { getTenantId } = require('../shared/tenant-context');
 
 /**
  * Serviço de persistência e reconciliação de settings de IA.
  * Extraído de index.js para reduzir o tamanho do arquivo principal.
  */
 
-function createAISettingsService({ db, log, logAIReconcileIssue, processEnv }) {
+function createAISettingsService({
+  db,
+  log,
+  logAIReconcileIssue,
+  processEnv,
+  signToken = signInternalToken,
+  resolveTenantId = getTenantId,
+  fetchImpl = global.fetch,
+}) {
   const AI_SERVICE_URL = processEnv.AI_SERVICE_URL || 'http://observe-ai:3000';
   const AI_TIMEOUT_MS = parseInt(processEnv.AI_TIMEOUT_MS || '30000', 10);
   const DISCOVERY_SERVICE_URL = processEnv.DISCOVERY_SERVICE_URL || 'http://observe-discovery:3010';
@@ -17,9 +26,9 @@ function createAISettingsService({ db, log, logAIReconcileIssue, processEnv }) {
     const timeout = AI_TIMEOUT_MS;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
-    const jwt = signInternalToken({ sub: 'r-observe-api', service: 'ai', role: 'admin' });
+    const jwt = signToken({ sub: 'r-observe-api', service: 'api', role: 'operator', aud: 'ai', scope: ['ai:access', 'ai:settings:write'], tenant_id: resolveTenantId() });
     try {
-      const resp = await fetch(`${AI_SERVICE_URL}${path}`, {
+      const resp = await fetchImpl(`${AI_SERVICE_URL}${path}`, {
         ...options,
         headers: { 'Content-Type': 'application/json', 'x-internal-token': jwt, ...(options.headers || {}) },
         signal: ctrl.signal,
@@ -51,9 +60,16 @@ function createAISettingsService({ db, log, logAIReconcileIssue, processEnv }) {
     const timeout = DISCOVERY_TIMEOUT_MS;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
-    const jwt = signInternalToken({ sub: 'r-observe-api', service: 'api', role: 'admin' });
+    const jwt = signToken({
+      sub: 'r-observe-api',
+      service: 'api',
+      role: 'operator',
+      aud: 'discovery',
+      scope: ['discovery:access', 'discovery:write'],
+      tenant_id: resolveTenantId(),
+    });
     try {
-      const resp = await fetch(`${DISCOVERY_SERVICE_URL}${path}`, {
+      const resp = await fetchImpl(`${DISCOVERY_SERVICE_URL}${path}`, {
         ...options,
         headers: { 'Content-Type': 'application/json', 'x-internal-token': jwt, ...(options.headers || {}) },
         signal: ctrl.signal,

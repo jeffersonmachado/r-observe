@@ -110,7 +110,7 @@ async function main() {
     // 2. Atualiza a senha usando pgcrypto (mesmo método do bootstrap)
     await pool.query(
       `UPDATE icingaweb_user 
-       SET password_hash = convert_to(crypt($2::text, gen_salt('bf')), 'UTF8'),
+       SET password_hash = convert_to(crypt($2::text, gen_salt('bf', 12)), 'UTF8'),
            mtime = NOW()
        WHERE lower(name) = lower($1::text)`,
       [username, newPassword]

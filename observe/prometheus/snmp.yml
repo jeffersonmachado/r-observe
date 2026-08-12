@@ -1,6 +1,11 @@
 # SNMP Exporter configuration — physical layer (L1) metrics
 # Generates: ifSpeed, ifOperStatus, ifInErrors, ifOutErrors, ifHCInOctets, ifHCOutOctets
 
+auths:
+  public_v2:
+    community: ${SNMP_COMMUNITY}
+    version: 2
+
 modules:
   # ── Standard IF-MIB (all vendors) ───────────────────────────────────────
   if_mib:

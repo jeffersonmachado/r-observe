@@ -5,7 +5,46 @@ const assert = require('node:assert');
 const { EventEmitter } = require('node:events');
 const https = require('node:https');
 
-const { syncDiscoveredToIcinga } = require('../../src/integrations/icinga');
+const {
+  syncDiscoveredToIcinga,
+  tlsOptions,
+  icingaString,
+  renderHostConfig,
+  renderServiceConfig,
+} = require('../../src/integrations/icinga');
+
+test('Icinga valida TLS por padrão e exige opt-out explícito', () => {
+  assert.strictEqual(tlsOptions({}).rejectUnauthorized, true);
+  assert.strictEqual(tlsOptions({ ICINGA_API_TLS_REJECT_UNAUTHORIZED: 'true' }).rejectUnauthorized, true);
+  assert.strictEqual(tlsOptions({ ICINGA_API_TLS_REJECT_UNAUTHORIZED: 'false' }).rejectUnauthorized, false);
+});
+
+test('renderizador Icinga impede quebra da DSL por dados descobertos', () => {
+  assert.strictEqual(icingaString('x"\\\n} object Host "evil" {'), 'x\\"\\\\\\n} object Host \\"evil\\" {');
+  const rendered = renderHostConfig([{
+    asset_name: 'safe-host',
+    hostname: '10.0.0.1\n} object Host "evil" {',
+    display_name: 'line1\nline2',
+    vendor: 'vendor"\nvars.pwned = true',
+  }]);
+  assert.ok(!rendered.includes('\n} object Host "evil" {'));
+  assert.ok(rendered.includes('\\n} object Host \\"evil\\" {'));
+  assert.ok(rendered.includes('line1\\nline2'));
+});
+
+test('renderizador Icinga ignora portas inválidas e normaliza portas numéricas', () => {
+  const rendered = renderServiceConfig([{
+    asset_name: 'host',
+    services: [
+      { port: '443', protocol: 'tcp' },
+      { port: '22\n} object Host "evil" {', protocol: 'tcp' },
+      { port: 70000, protocol: 'tcp' },
+    ],
+  }]);
+  assert.match(rendered, /vars\.http_port = 443/);
+  assert.ok(!rendered.includes('evil'));
+  assert.ok(!rendered.includes('70000'));
+});
 
 test('syncDiscoveredToIcinga com lista vazia nao depende de rede', async () => {
   const out = await syncDiscoveredToIcinga({
@@ -30,7 +69,7 @@ function mockHttpsRequest(routes, calls) {
     req.end = () => {
       const method = options.method || 'GET';
       const path = options.path;
-      calls.push({ method, path, body: Buffer.concat(chunks).toString('utf8') });
+      calls.push({ method, path, body: Buffer.concat(chunks).toString('utf8'), rejectUnauthorized: options.rejectUnauthorized });
 
       const route = routes.find((entry) => entry.method === method && entry.path === path);
       if (!route) {
@@ -83,6 +122,7 @@ test('syncDiscoveredToIcinga atualiza host existente com POST', async () => {
     assert.strictEqual(out.synced, 1);
     assert.strictEqual(out.staged, true);
     assert.strictEqual(out.deployed, true);
+    assert.ok(calls.every((call) => call.rejectUnauthorized === true));
     assert.ok(calls.some((call) => call.method === 'POST' && call.path === '/v1/objects/hosts/existing-host'));
     assert.ok(!calls.some((call) => call.method === 'PUT' && call.path === '/v1/objects/hosts/existing-host'));
   } finally {

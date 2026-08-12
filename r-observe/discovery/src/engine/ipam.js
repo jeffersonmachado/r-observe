@@ -173,34 +173,37 @@ class IpamRepository {
     return rows;
   }
 
-  async getSubnetByCidr(cidr) {
+  async getSubnetByCidr(cidr, tenant_id, site_id) {
     const { rows } = await this.db.query(
-      'SELECT * FROM observe_ipam_subnets WHERE cidr = $1', [cidr]
+      'SELECT * FROM observe_ipam_subnets WHERE cidr = $1 AND tenant_id=$2 AND site_id=$3',
+      [cidr, tenant_id || 'default', site_id || 'default-site']
     );
     return rows[0] || null;
   }
 
-  async registerIp({ ip, subnet_cidr, hostname, mac, status, asset_id }) {
+  async registerIp({ ip, subnet_cidr, hostname, mac, status, asset_id, tenant_id, site_id }) {
     const { rows } = await this.db.query(
-      `INSERT INTO observe_ipam_ips (ip, subnet_cidr, hostname, mac, status, asset_id, last_seen_at)
-       VALUES ($1,$2,$3,$4,$5,$6,NOW())
-       ON CONFLICT (ip) DO UPDATE SET
-         hostname = COALESCE($3, observe_ipam_ips.hostname),
-         mac = COALESCE($4, observe_ipam_ips.mac),
-         status = $5,
-         asset_id = COALESCE($6, observe_ipam_ips.asset_id),
-         last_seen_at = NOW()`,
-      [ip, subnet_cidr, hostname || null, mac || null, status || 'active', asset_id || null]
+      `INSERT INTO observe_ipam_ips (tenant_id, site_id, ip, subnet_cidr, hostname, mac, status, asset_id, last_seen_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+       ON CONFLICT (tenant_id, site_id, ip) DO UPDATE SET
+         hostname = COALESCE(EXCLUDED.hostname, observe_ipam_ips.hostname),
+         mac = COALESCE(EXCLUDED.mac, observe_ipam_ips.mac),
+         status = EXCLUDED.status,
+         asset_id = COALESCE(EXCLUDED.asset_id, observe_ipam_ips.asset_id),
+         subnet_cidr = EXCLUDED.subnet_cidr,
+         last_seen_at = NOW()
+       RETURNING *`,
+      [tenant_id || 'default', site_id || 'default-site', ip, subnet_cidr, hostname || null, mac || null, status || 'active', asset_id || null]
     );
     return rows[0];
   }
 
-  async getSubnetUtilization(cidr) {
+  async getSubnetUtilization(cidr, tenant_id, site_id) {
     const info = parseSubnet(cidr);
     const { rows } = await this.db.query(
       `SELECT COUNT(*) as used FROM observe_ipam_ips
-       WHERE subnet_cidr = $1 AND status = 'active'`,
-      [cidr]
+       WHERE subnet_cidr = $1 AND tenant_id=$2 AND site_id=$3 AND status = 'active'`,
+      [cidr, tenant_id || 'default', site_id || 'default-site']
     );
     const used = parseInt(rows[0]?.used || 0, 10);
     return {
@@ -212,20 +215,20 @@ class IpamRepository {
     };
   }
 
-  async getIpsInSubnet(cidr) {
+  async getIpsInSubnet(cidr, tenant_id, site_id) {
     const { rows } = await this.db.query(
-      `SELECT * FROM observe_ipam_ips WHERE subnet_cidr = $1 ORDER BY ip`,
-      [cidr]
+      `SELECT * FROM observe_ipam_ips WHERE tenant_id=$1 AND site_id=$2 AND ($3::text IS NULL OR subnet_cidr = $3) ORDER BY ip`,
+      [tenant_id || 'default', site_id || 'default-site', cidr || null]
     );
     return rows;
   }
 
-  async findSubnetForIp(ip) {
+  async findSubnetForIp(ip, tenant_id, site_id) {
     const { rows } = await this.db.query(
       `SELECT * FROM observe_ipam_subnets
-       WHERE network_addr <= $1::inet AND broadcast_addr >= $1::inet
+       WHERE network_addr <= $1::inet AND broadcast_addr >= $1::inet AND tenant_id=$2 AND site_id=$3
        ORDER BY prefix_len DESC LIMIT 1`,
-      [ip]
+      [ip, tenant_id || 'default', site_id || 'default-site']
     );
     return rows[0] || null;
   }
@@ -237,7 +240,7 @@ class IpamRepository {
     const results = [];
     for (const entry of arpEntries) {
       try {
-        const subnet = await this.findSubnetForIp(entry.ip);
+        const subnet = await this.findSubnetForIp(entry.ip, tenant_id, site_id);
         const cidr = subnet?.cidr || await findEnclosingSubnet([entry.ip]) || 'unknown';
 
         if (subnet) {
@@ -246,6 +249,8 @@ class IpamRepository {
             subnet_cidr: cidr,
             mac: entry.mac,
             status: 'active',
+            tenant_id,
+            site_id,
           });
           results.push({ ip: entry.ip, mac: entry.mac, subnet: cidr, imported: true });
         }

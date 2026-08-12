@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { describe, it } = require('node:test');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -42,8 +44,6 @@ describe('API Shared Modules · Smoke', () => {
   });
 
   it('auth middleware cria requireAuth/requireRole/requireAdmin', () => {
-    process.env.JWT_SECRET = process.env.JWT_SECRET || 'test';
-    process.env.JWT_SECRET = process.env.JWT_SECRET || 'test';
     const { createAuthMiddleware } = require('../src/middleware/auth');
     const auth = createAuthMiddleware(
       { async query() { return { rows: [], rowCount: 0 }; } },
@@ -89,6 +89,64 @@ describe('API Health Endpoints · Contracts', () => {
         assert.ok(key in ex, `${ex.service} health deve ter "${key}"`);
       }
     }
+  });
+});
+
+describe('API Operational Endpoints · Exposure', () => {
+  it('metrics não aceita credencial pela query string e é bloqueado no proxy público', () => {
+    const apiCode = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');
+    const nginxCode = fs.readFileSync(path.resolve(__dirname, '../../../observe/nginx/conf.d/observe.conf'), 'utf8');
+
+    const metricsRoute = apiCode.slice(
+      apiCode.indexOf('app.get(`${BASE}/metrics`'),
+      apiCode.indexOf('// Status', apiCode.indexOf('app.get(`${BASE}/metrics`')),
+    );
+    assert.doesNotMatch(metricsRoute, /req\.query\.token|verifyInternalToken/);
+    assert.match(nginxCode, /location = \/observe\/api\/metrics \{ return 404; \}/);
+    assert.match(nginxCode, /location = \/observe\/api\/sd\/targets \{ return 404; \}/);
+    assert.doesNotMatch(nginxCode, /add_header Content-Type application\/json/);
+  });
+
+  it('páginas operacionais redirecionam sessões ausentes antes do 404', () => {
+    const apiCode = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');
+    const notFoundAt = apiCode.indexOf("app.use((_req, res) => res.status(404)");
+    for (const route of ['/observe/settings', '/observe/config', '/observe/home', '/observe/ai']) {
+      const declaration = `app.get('${route}', requireWebSession,`;
+      const routeAt = apiCode.indexOf(declaration);
+      assert.ok(routeAt >= 0, `${route} precisa exigir sessão web`);
+      assert.ok(routeAt < notFoundAt, `${route} precisa ser registrada antes do 404`);
+      assert.equal(apiCode.indexOf(declaration, routeAt + 1), -1, `${route} não deve ser duplicada`);
+    }
+  });
+
+  it('JWTs M2M exigem scopes específicos para eventos e inventário', () => {
+    const apiCode = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');
+    assert.match(apiCode, /app\.post\(`\$\{BASE\}\/events`, requireAuth, requireScopeForJwt\('api:events:write'\)/);
+    assert.match(apiCode, /app\.post\(`\$\{BASE\}\/icinga\/events`, requireAuth, requireScopeForJwt\('api:events:write'\)/);
+    assert.match(apiCode, /app\.post\(`\$\{BASE\}\/hosts`, requireAuth, requireAdmin, requireInventoryWrite,/);
+    assert.match(apiCode, /app\.post\(`\$\{BASE\}\/inventory\/docker`, requireAuth, requireAdmin, requireInventoryWrite,/);
+  });
+
+  it('todas as mutações administrativas limitam também o domínio do JWT', () => {
+    const apiCode = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');
+    const adminMutations = apiCode.match(/^app\.(?:post|patch|delete)\([^\n]+requireAdmin[^\n]+/gm) || [];
+    assert.ok(adminMutations.length > 0);
+    for (const route of adminMutations) {
+      assert.match(
+        route,
+        /require(?:Admin|Inventory|Discovery|AI|Remediation)Write,/,
+        `scope M2M ausente: ${route}`,
+      );
+    }
+  });
+
+  it('sondas HTTP do Agent não vazam JWT para alvos monitorados', () => {
+    const agentCode = fs.readFileSync(path.resolve(__dirname, '../../agent/src/index.js'), 'utf8');
+    const checkHttp = agentCode.slice(
+      agentCode.indexOf('async function checkHTTP'),
+      agentCode.indexOf('// Check: TCP', agentCode.indexOf('async function checkHTTP')),
+    );
+    assert.doesNotMatch(checkHttp, /x-internal-token|signInternalToken/);
   });
 });
 

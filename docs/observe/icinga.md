@@ -17,7 +17,8 @@ Defina em `.env.observe` antes do deploy:
 |------------------------|-------------|-------------------------------------------|
 | `ICINGA_API_USER`      | sim         | Usuário da API (padrão: icingaweb2)       |
 | `ICINGA_API_PASSWORD`  | sim         | Senha do usuário da API                   |
-| `ICINGA_ROOT_PASSWORD` | não         | Senha root (omitir para não criar o user) |
+| `ICINGA_API_TLS_REJECT_UNAUTHORIZED` | não | Valida o certificado TLS; padrão `true` |
+| `ICINGA_API_CA_FILE`   | não         | Caminho, dentro do serviço cliente, para a CA confiável |
 | `ICINGA_REDIS_HOST`    | auto        | Host Redis IcingaDB (icinga-redis)        |
 | `ICINGA_REDIS_PORT`    | auto        | Porta Redis (6379)                        |
 | `ICINGADB_DB_NAME`     | sim         | Nome do banco IcingaDB (icingadb)         |
@@ -165,12 +166,6 @@ Os apply rules para SMTP, IMAP, etc. estão em
 `conf.d/mail-services.conf`. Eles são ativados automaticamente
 pelas variáveis do host (definidas pelo `discover-hosts.sh`
 ou manualmente via API).
-
-## Usuário root da API
-
-O usuário `root` (permissões totais) **só é criado** se
-`ICINGA_ROOT_PASSWORD` estiver definido e não-vazio no `.env.observe`.
-Se omitido, apenas o usuário `ICINGA_API_USER` existe.
 
 ## Módulo IcingaDB no IcingaWeb2
 
