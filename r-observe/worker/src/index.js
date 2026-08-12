@@ -6,6 +6,7 @@ const remediation = require('./remediation');
 const icinga      = require('./icinga');
 const { createDbClient } = require('./db');
 const { createEventProcessor } = require('./services/event-processor');
+const { createWhatsAppNotifier } = require('./services/whatsapp-notify');
 const { createLifecycle } = require('../shared/lifecycle');
 const { runWithTenant } = require('../shared/tenant-context');
 
@@ -37,6 +38,8 @@ const redis = new Redis(process.env.REDIS_URL, {
 redis.on('error', (e) => log('error', 'Redis error', { err: e.message }));
 
 // ─── Event processor (extraído para services/event-processor.js) ────────────
+const whatsapp = createWhatsAppNotifier({ db, log });
+
 const processorState = { count: 0 };
 const {
   rem,
@@ -48,6 +51,7 @@ const {
   db,
   remediation,
   icinga,
+  whatsapp,
   log,
   config: {
     AI_ENABLED,

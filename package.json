@@ -33,6 +33,7 @@
     "observe:discover:r-observe": "bash ./scripts/observe/discover-hosts.sh --mode r-observe",
     "observe:discover:sd": "bash ./scripts/observe/discover-hosts.sh --mode prometheus-sd",
     "observe:discover:all": "bash ./scripts/observe/discover-hosts.sh --mode all",
+    "observe:update-versions": "node scripts/observe/update-stack-versions.js",
     "observe:discover:engine:scan": "curl -sS -X POST http://localhost:3080/observe/discovery/api/discovery/scan -H 'Content-Type: application/json' -d '{\"profile\":\"safe\",\"trigger\":\"npm-script\"}'",
     "observe:discover:engine:runs": "curl -sS http://localhost:3080/observe/discovery/api/discovery/runs",
     "observe:discover:engine:assets": "curl -sS http://localhost:3080/observe/discovery/api/discovery/assets",

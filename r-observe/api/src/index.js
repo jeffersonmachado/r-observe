@@ -19,6 +19,8 @@ const { validateBody } = require('./middleware/validate-body');
 const bodySchemas = require('./schemas/api');
 const { createCorsOptions } = require('./http/cors-options');
 const { createAISettingsService } = require('./services/ai-settings');
+const { createWhatsAppSettingsService } = require('./services/whatsapp-settings');
+const { sendWhatsAppMessage, validateAccessToken } = require('./shared/whatsapp');
 const { createLifecycle } = require('./shared/lifecycle');
 const { createHttpErrorHandler } = require('./shared/http-error-handler');
 const { createAuditMiddleware } = require('./audit');
@@ -278,7 +280,10 @@ const {
   upsertPersistedAISettings,
   applyPersistedAISettingsOnStartup,
   reconcilePersistedAISettings,
+  validateProviderKey,
 } = createAISettingsService({ db, log, logAIReconcileIssue, processEnv: process.env });
+
+const whatsappSettings = createWhatsAppSettingsService({ db, log });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -997,6 +1002,7 @@ td{padding:.5rem;border-bottom:1px solid var(--border)}
   <span style="flex:1"></span>
   <a href="/observe/home">⌂ Home</a>
   <a href="/observe/discovery">🔍 Discovery</a>
+  <a href="/observe/versions">ⓘ Versões</a>
   <a href="/observe/settings">⚙ Configuração</a>
   <button type="button" onclick="logout()">Sair</button>
 </div>
@@ -1193,11 +1199,82 @@ app.get(`${BASE}/system/status`, requireAuth, async (_req, res) => {
       ai: aiStatus.status === 'fulfilled' ? aiStatus.value : { status: 'unknown' },
       agents: agentStatus.status === 'fulfilled' ? agentStatus.value : { total: 0, online: 0, offline: 0 },
       discovery: discoveryStatus.status === 'fulfilled' ? discoveryStatus.value : { total_assets: 0 },
-      settings: await systemSettings.load(),
+      settings: await (async () => {
+        const settings = await systemSettings.load();
+        // O provider/modelo real de IA fica em observe_ai_settings (não no
+        // bloco legado observe_system_settings.ai). Sobrescreve para que o
+        // status "IA Provider" da UI reflita o provider realmente ativo.
+        const persistedAI = await getPersistedAISettings().catch(() => null);
+        if (persistedAI) {
+          settings.ai = { ...(settings.ai || {}), provider: persistedAI.provider, model: persistedAI.model };
+        }
+        return settings;
+      })(),
     });
   } catch (e) {
     res.json({ error: e.message });
   }
+});
+
+// ─── WhatsApp (notificações) — configuração persistida no banco, via UI ──────
+app.get(`${BASE}/system/whatsapp`, requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    res.json(await whatsappSettings.get());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put(`${BASE}/system/whatsapp`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
+  try {
+    const body = req.body || {};
+    // Valida um token recém-informado no Graph API antes de persistir.
+    const newToken = body.access_token ? String(body.access_token).trim() : '';
+    if (newToken && !/^[\u25CF*\u2022]/.test(newToken)) {
+      const validation = await validateAccessToken({ accessToken: newToken });
+      if (!validation.valid) {
+        return res.status(400).json({ error: 'Token inválido: o Meta rejeitou a autenticação.' });
+      }
+    }
+    res.json(await whatsappSettings.update(body));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE}/system/whatsapp/test`, requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const cfg = await whatsappSettings.getRaw();
+    if (!cfg || !cfg.enabled) return res.status(400).json({ error: 'WhatsApp não está habilitado.' });
+    if (!cfg.access_token || !cfg.phone_number_id || !cfg.recipient) {
+      return res.status(400).json({ error: 'Configuração incompleta: preencha token, Phone Number ID e destinatário.' });
+    }
+    const to = (req.body && req.body.recipient) || cfg.recipient;
+    const result = await sendWhatsAppMessage({
+      accessToken: cfg.access_token,
+      phoneNumberId: cfg.phone_number_id,
+      to,
+      text: '✅ R-Observe: notificação WhatsApp configurada com sucesso.',
+    });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// ─── Versões da stack ────────────────────────────────────────────────────────
+// Gerado por scripts/observe/update-stack-versions.js (npm run observe:update-versions).
+// NÃO edite manualmente — rode o script após alterar versões no compose/Dockerfiles.
+const STACK_VERSIONS = require('./stack-versions.json');
+
+// Versões da stack — consumida pela página /observe/versions
+app.get(`${BASE}/system/versions`, requireAuth, (_req, res) => {
+  res.json({
+    stack: STACK_VERSIONS.stack,
+    version: STACK_VERSIONS.version,
+    generated_at: new Date().toISOString(),
+    groups: STACK_VERSIONS.groups,
+  });
 });
 
 // ─── Asset Detail ────────────────────────────────────────────────────────
@@ -1329,6 +1406,13 @@ app.post(`${BASE}/ai/settings`, requireAuth, requireAdmin, requireAIWrite, async
     const p = provider || body.provider;
     if (p === 'openai'    && !key.startsWith('sk-'))     return res.status(400).json({ error: 'Chaves OpenAI devem começar com "sk-"' });
     if (p === 'anthropic' && !key.startsWith('sk-ant-')) return res.status(400).json({ error: 'Chaves Anthropic devem começar com "sk-ant-"' });
+
+    // Valida a chave no provider antes de persistir (rejeita chave inválida).
+    const targetProvider = (provider ?? body.provider ?? '').toLowerCase();
+    const validation = await validateProviderKey(targetProvider, key);
+    if (!validation.valid) {
+      return res.status(400).json({ error: `Chave inválida para ${targetProvider}: o provider rejeitou a autenticação.` });
+    }
   }
 
   const persisted = await upsertPersistedAISettings({
@@ -1666,6 +1750,12 @@ app.get('/observe/ai', requireWebSession, (_req, res) => {
   res.end(AI_DASHBOARD_HTML);
 });
 
+// ─── UI: versões da stack ─────────────────────────────────────────────────────
+app.get('/observe/versions', requireWebSession, (_req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.end(VERSIONS_HTML);
+});
+
 // ─── 404 handler ─────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
@@ -1912,6 +2002,7 @@ const HOME_HTML = /* html */`<!DOCTYPE html>
   <span class="topbar-title">/ R-Observe Home</span>
   <div style="margin-left:auto;display:flex;gap:.5rem;align-items:center;">
     <a href="/icinga/" class="topbar-link">🔍 Icinga</a>
+    <a href="/observe/versions" class="topbar-link">ⓘ Versões</a>
   </div>
 </div>
   <main class="wrap">
@@ -1994,6 +2085,7 @@ const AI_DASHBOARD_HTML = /* html */`<!DOCTYPE html>
     <a href="/observe/home" class="topbar-link">⌂ Home</a>
     <a href="/icinga/" class="topbar-link">🔍 Icinga</a>
     <a href="/observe/settings" class="topbar-link">⚙ Config</a>
+    <a href="/observe/versions" class="topbar-link">ⓘ Versões</a>
   </div>
 </div>
 <div class="header-controls">
@@ -2409,6 +2501,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
     <a href="/observe/home" class="topbar-link">⌂ Home</a>
     <a href="/observe/ai" class="topbar-link">IA Dashboard</a>
     <a href="/icinga/" class="topbar-link">🔍 Icinga</a>
+    <a href="/observe/versions" class="topbar-link">ⓘ Versões</a>
     <button class="topbar-link" onclick="logout()" style="border:1px solid var(--border);background:transparent;cursor:pointer">Sair</button>
   </div>
 </div>
@@ -2429,6 +2522,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
     <button id="settings-tab-os" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="os" onclick="switchTab('os')">💻 SO</button>
     <button id="settings-tab-certs" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="certs" onclick="switchTab('certs')">🔒 Certs</button>
     <button id="settings-tab-monitoring" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="monitoring" onclick="switchTab('monitoring')">📊 Monitoramento</button>
+    <button id="settings-tab-whatsapp" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="whatsapp" onclick="switchTab('whatsapp')">💬 WhatsApp</button>
   </div>
 
   <div class="settings-layout">
@@ -2567,8 +2661,8 @@ function switchTab(tab){
     document.getElementById('dirty-status').textContent='Nenhuma alteração pendente.';
   }
   _activeSettingsTab=tab;
-  document.getElementById('save-section-btn').hidden=tab==='ai';
-  document.getElementById('dirty-status').hidden=tab==='ai';
+  document.getElementById('save-section-btn').hidden=tab==='ai'||tab==='whatsapp';
+  document.getElementById('dirty-status').hidden=tab==='ai'||tab==='whatsapp';
   document.querySelectorAll('.tab-btn').forEach(b=>{
     const active=b.dataset.tab===tab;
     b.classList.toggle('active',active);
@@ -2583,6 +2677,7 @@ function switchTab(tab){
   else if(tab==='os') renderOS(p);
   else if(tab==='certs') renderCerts(p);
   else if(tab==='monitoring') renderMonitoring(p);
+  else if(tab==='whatsapp') renderWhatsApp(p);
 }
 
 document.querySelector('.tabs[role="tablist"]').addEventListener('keydown',event=>{
@@ -2711,6 +2806,96 @@ function renderCerts(el){
   el.appendChild(h('div',{className:'field'},[h('label',{for:'sld-cert_crit'},'Alerta crítico quando restarem (dias)'),slider('cert_crit',1,14,1,s.expiry_critical_days??7,' dias')]));
 }
 
+// ── WhatsApp Tab ──
+let _whatsapp={enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false};
+function renderWhatsApp(el){
+  const w=_whatsapp||{};
+  el.innerHTML='';
+  el.appendChild(h('div',{className:'panel-title'},'Notificações via WhatsApp Business'));
+  el.appendChild(h('details',{className:'wa-help',open:''},[
+    h('summary',{},'ℹ️ Como obter o token e os dados'),
+    h('ol',{className:'wa-help-steps'},[
+      h('li',{},[h('strong',{},'1. App e número: '),'crie um app do tipo Business no ',h('a',{href:'https://developers.facebook.com/apps',target:'_blank',rel:'noopener',style:'color:var(--accent-h)'},'Meta for Developers'),', adicione o produto WhatsApp e conecte um número de teste.']),
+      h('li',{},[h('strong',{},'2. Token: '),'em ',h('a',{href:'https://business.facebook.com/',target:'_blank',rel:'noopener',style:'color:var(--accent-h)'},'Business Settings'),' → Usuários → Usuários do sistema → Gerar token, com as permissões ',h('code',{},'whatsapp_business_messaging'),' e ',h('code',{},'whatsapp_business_management'),'.']),
+      h('li',{},[h('strong',{},'3. Phone Number ID: '),'em WhatsApp → Gerenciador de API (API Setup), ao lado do número de teste.']),
+      h('li',{},[h('strong',{},'4. Destinatário de teste: '),'adicione o número em API Setup → "To:" (máx. 5) e confirme o opt-in enviando o código a partir do número de teste.'])
+    ]),
+    h('div',{className:'wa-help-links'},[
+      h('a',{href:'https://developers.facebook.com/docs/whatsapp/cloud-api/get-started',target:'_blank',rel:'noopener'},'Guia oficial Cloud API ↗'),
+      h('a',{href:'https://developers.facebook.com/apps',target:'_blank',rel:'noopener'},'Meta for Developers ↗')
+    ])
+  ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{className:'toggle-switch',style:'display:inline-flex;align-items:center;gap:.6rem;cursor:pointer'},[
+      h('input',{type:'checkbox',id:'tog-wa_enabled',onchange:'markDirty()'}),
+      h('span',{className:'toggle-slider'})
+    ]),
+    h('div',{className:'toggle-desc'},'Enviar notificações de incidentes pelo WhatsApp')
+  ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{for:'wa-phone'},'Phone Number ID'),
+    h('input',{type:'text',id:'wa-phone',value:w.phone_number_id||'',placeholder:'Ex: 109092465222526',autocomplete:'off',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',oninput:'markDirty()'})
+  ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{for:'wa-recipient'},'Destinatário (formato E.164)'),
+    h('input',{type:'text',id:'wa-recipient',value:w.recipient||'',placeholder:'Ex: 15550123456',autocomplete:'off',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',oninput:'markDirty()'})
+  ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{for:'wa-severity'},'Severidade mínima para notificar'),
+    h('select',{id:'wa-severity',onchange:'markDirty()',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px'},[
+      h('option',{value:'critical'},'Somente crítico'),
+      h('option',{value:'warning'},'Crítico + warning'),
+      h('option',{value:'all'},'Todos')
+    ])
+  ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{for:'wa-token'},'Access Token'),
+    h('input',{type:'password',id:'wa-token',value:'',placeholder:w.token_set?'•••••••• (mantido)':'Cole o token de acesso',autocomplete:'new-password',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',oninput:'markDirty()'}),
+    h('div',{className:'hint'},w.token_set?'Token salvo — deixe em branco para manter o atual.':'O token é armazenado no banco e nunca é exibido novamente.')
+  ]));
+  el.appendChild(h('div',{className:'actions'},[
+    h('button',{className:'btn btn-secondary',type:'button',onclick:'loadWhatsApp()'},'↺ Atualizar'),
+    h('button',{className:'btn btn-secondary',type:'button',id:'wa-test-btn',onclick:'sendWhatsAppTest(event)'},'📱 Enviar teste'),
+    h('button',{className:'btn btn-primary',type:'button',onclick:'saveWhatsApp()'},'Salvar WhatsApp')
+  ]));
+  document.getElementById('tog-wa_enabled').checked=!!w.enabled;
+  document.getElementById('wa-severity').value=w.severity_filter||'critical';
+}
+function loadWhatsApp(){
+  fetch(API+'/system/whatsapp',{headers:getHeaders()}).then(r=>r.json()).then(d=>{
+    _whatsapp=(d&&!d.error)?d:{enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false};
+    if(_activeSettingsTab==='whatsapp') renderWhatsApp(document.getElementById('settings-panel'));
+  }).catch(e=>{ if(_activeSettingsTab==='whatsapp') showFeedback('Falha ao carregar WhatsApp: '+e.message,false); });
+}
+function saveWhatsApp(){
+  const body={
+    enabled:document.getElementById('tog-wa_enabled').checked,
+    phone_number_id:document.getElementById('wa-phone').value.trim(),
+    recipient:document.getElementById('wa-recipient').value.trim(),
+    severity_filter:document.getElementById('wa-severity').value,
+    access_token:document.getElementById('wa-token').value.trim()
+  };
+  fetch(API+'/system/whatsapp',{method:'PUT',headers:getHeaders(),body:JSON.stringify(body)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showFeedback('Erro: '+d.error,false);return;}
+      _whatsapp=d;_dirty=false;
+      document.getElementById('save-section-btn').disabled=true;
+      document.getElementById('dirty-status').textContent='Nenhuma alteração pendente.';
+      showFeedback('Configuração WhatsApp salva',true);
+      renderWhatsApp(document.getElementById('settings-panel'));
+    }).catch(e=>showFeedback('Erro: '+e.message,false));
+}
+function sendWhatsAppTest(ev){
+  const btn=(ev&&ev.target)?ev.target:document.getElementById('wa-test-btn');
+  btn.disabled=true;
+  fetch(API+'/system/whatsapp/test',{method:'POST',headers:getHeaders(),body:JSON.stringify({})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showFeedback('Falha no teste: '+d.error,false);}
+      else showFeedback('Mensagem de teste enviada!',true);
+    }).catch(e=>showFeedback('Falha no teste: '+e.message,false))
+    .finally(()=>{btn.disabled=false;});
+}
+
 // ── AI helpers ──
 
 function getHeaders(){
@@ -2787,6 +2972,249 @@ document.querySelectorAll('.tab-btn').forEach(button=>button.disabled=true);
 document.getElementById('settings-panel').innerHTML='<div class="loading-state" role="status">Carregando configuração real…</div>';
 loadStatus();
 setInterval(loadStatus,30000);
+loadWhatsApp();
+</script>
+</body>
+</html>`;
+
+const VERSIONS_HTML = /* html */`<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Results · R-Observe · Versões da Stack</title>
+  <style>
+    :root {
+      --bg: #07080c;
+      --surface: rgba(255, 255, 255, 0.03);
+      --card: rgba(18, 20, 28, 0.72);
+      --text: #e7e9ef;
+      --muted: #8b90a0;
+      --border: rgba(255, 255, 255, 0.08);
+      --brand: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 520px at 12% -8%, rgba(239, 68, 68, 0.20), transparent 60%),
+        radial-gradient(900px 480px at 88% -4%, rgba(99, 102, 241, 0.18), transparent 60%),
+        radial-gradient(700px 420px at 50% 110%, rgba(34, 211, 238, 0.10), transparent 60%),
+        var(--bg);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Topbar ─────────────────────────────────────────────────────────── */
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 28px;
+      background: rgba(10, 11, 16, 0.7);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar .logo {
+      width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+      background: linear-gradient(135deg, #ef4444, #b91c1c);
+      display: grid; place-items: center;
+      box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
+    }
+    .topbar .logo svg { width: 18px; height: 18px; }
+    .topbar-brand { font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--brand); }
+    .topbar-title { font-size: .84rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .topbar-nav { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+    .topbar-link {
+      color: var(--muted); text-decoration: none; font-size: .82rem;
+      padding: 7px 12px; border-radius: 9px; transition: color .15s ease, background .15s ease;
+    }
+    .topbar-link:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+    .topbar-link.active { color: #fff; background: rgba(239, 68, 68, 0.16); border: 1px solid rgba(239, 68, 68, 0.35); }
+    .topbar-link.logout { border: 1px solid var(--border); background: transparent; cursor: pointer; }
+
+    /* ── Layout ─────────────────────────────────────────────────────────── */
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px 48px; }
+    .hero { text-align: center; padding: 56px 0 30px; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: .72rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+      color: var(--muted); background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; margin-bottom: 20px;
+    }
+    .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 10px #34d399; }
+    .hero h1 { margin: 0; font-size: clamp(2rem, 4.4vw, 3rem); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; }
+    .hero h1 .grad {
+      background: linear-gradient(100deg, #f87171, #fbbf24 55%, #34d399);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .lead { margin: 14px auto 0; max-width: 560px; color: var(--muted); font-size: .98rem; line-height: 1.6; }
+
+    .stats { display: flex; justify-content: center; gap: 12px; margin-top: 26px; flex-wrap: wrap; }
+    .stat {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 14px 22px; min-width: 128px; backdrop-filter: blur(8px);
+      transition: transform .16s ease, border-color .16s ease;
+    }
+    .stat:hover { transform: translateY(-2px); border-color: rgba(255, 255, 255, 0.18); }
+    .stat .n { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; }
+    .stat .l { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-top: 2px; }
+    .updated { margin-top: 16px; font-size: .8rem; color: var(--muted); }
+
+    .refresh {
+      margin-top: 18px; display: inline-flex; align-items: center; gap: 7px;
+      font-size: .83rem; font-weight: 600; color: var(--text);
+      background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border);
+      border-radius: 10px; padding: 9px 16px; cursor: pointer; transition: all .15s ease;
+    }
+    .refresh:hover { background: rgba(255, 255, 255, 0.09); border-color: rgba(255, 255, 255, 0.2); }
+
+    /* ── Groups grid ────────────────────────────────────────────────────── */
+    .groups {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;
+      margin-top: 28px;
+    }
+    @media (max-width: 780px) { .groups { grid-template-columns: 1fr; } }
+
+    .group-card {
+      position: relative; overflow: hidden;
+      background: var(--card); border: 1px solid var(--border); border-radius: 18px;
+      padding: 22px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+      animation: rise .4s ease both;
+    }
+    .group-card:nth-child(2) { animation-delay: .05s; }
+    .group-card:nth-child(3) { animation-delay: .1s; }
+    .group-card:nth-child(4) { animation-delay: .15s; }
+    .group-card::before {
+      content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, var(--accent), transparent 70%);
+    }
+    .group-card:hover {
+      transform: translateY(-4px);
+      border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+      box-shadow: 0 22px 48px -24px var(--accent-glow);
+    }
+    .g-core       { --accent: #818cf8; --accent-bg: rgba(129, 140, 248, .14); --accent-glow: rgba(129, 140, 248, .45); }
+    .g-monitoring { --accent: #34d399; --accent-bg: rgba(52, 211, 153, .14); --accent-glow: rgba(52, 211, 153, .45); }
+    .g-icinga     { --accent: #fbbf24; --accent-bg: rgba(251, 191, 36, .14); --accent-glow: rgba(251, 191, 36, .45); }
+    .g-data       { --accent: #22d3ee; --accent-bg: rgba(34, 211, 238, .14); --accent-glow: rgba(34, 211, 238, .45); }
+
+    .group-head { display: flex; align-items: center; gap: 13px; margin-bottom: 14px; }
+    .group-icon {
+      width: 42px; height: 42px; border-radius: 12px; flex-shrink: 0;
+      display: grid; place-items: center; font-size: 20px;
+      background: var(--accent-bg);
+    }
+    .group-meta h2 { margin: 0; font-size: 1rem; font-weight: 700; letter-spacing: -0.01em; }
+    .group-meta span { font-size: .74rem; color: var(--muted); }
+
+    .components { list-style: none; margin: 0; padding: 0; }
+    .components li {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      padding: 11px 2px; border-bottom: 1px solid var(--border);
+    }
+    .components li:last-child { border-bottom: none; padding-bottom: 0; }
+    .c-name { font-size: .9rem; color: var(--text); }
+    .c-ver {
+      font-family: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .76rem; color: #cbd5e1;
+      background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border);
+      padding: 4px 11px; border-radius: 999px; white-space: nowrap;
+    }
+
+    .loading, .error { text-align: center; padding: 4rem 1rem; color: var(--muted); }
+    .error { color: #f87171; }
+    .foot { text-align: center; padding: 32px 0 8px; font-size: .76rem; color: var(--muted); }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+<header class="topbar">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2 4 6v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-4Z" fill="#fff" opacity=".95"/><path d="m9 12 2 2 4-4" stroke="#ef4444" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </div>
+  <span class="topbar-brand">Results · Sistemas de Informática</span>
+  <span class="topbar-title">/ R-Observe · Versões da Stack</span>
+  <nav class="topbar-nav">
+    <a href="/observe/home" class="topbar-link">⌂ Home</a>
+    <a href="/icinga/" class="topbar-link">🔍 Icinga</a>
+    <a href="/observe/settings" class="topbar-link">⚙ Config</a>
+    <a href="/observe/versions" class="topbar-link active">ⓘ Versões</a>
+    <button class="topbar-link logout" onclick="logout()">Sair</button>
+  </nav>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <div class="eyebrow"><span class="dot"></span> Stack ativa</div>
+    <h1>Versões da <span class="grad">Stack</span></h1>
+    <p class="lead" id="stack-sub">Inventário de componentes e versões do ambiente de observabilidade.</p>
+    <div class="stats">
+      <div class="stat"><div class="n" id="stat-components">—</div><div class="l">Componentes</div></div>
+      <div class="stat"><div class="n" id="stat-groups">—</div><div class="l">Grupos</div></div>
+      <div class="stat"><div class="n" id="stat-version">—</div><div class="l">Versão</div></div>
+    </div>
+    <p class="updated" id="stack-updated"></p>
+    <button class="refresh" onclick="load()">↺ Atualizar</button>
+  </section>
+
+  <section class="groups" id="content">
+    <div class="loading">Carregando versões…</div>
+  </section>
+
+  <footer class="foot">R-Observe · Results Sistemas de Informática</footer>
+</main>
+
+<script>
+var GROUP_META = {
+  core:       { icon: '🧩', cls: 'g-core' },
+  monitoring: { icon: '📈', cls: 'g-monitoring' },
+  icinga:     { icon: '🛡️', cls: 'g-icinga' },
+  data:       { icon: '🗄️', cls: 'g-data' },
+};
+function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function csrfHeaders(){
+  var csrf = document.cookie.split('; ').find(function(v){ return v.split('=')[0].endsWith('_csrf'); });
+  return csrf ? { 'Content-Type':'application/json', 'X-CSRF-Token': decodeURIComponent(csrf.split('=').slice(1).join('=')) } : { 'Content-Type':'application/json' };
+}
+function logout(){ fetch('/observe/api/auth/logout',{method:'POST',headers:csrfHeaders()}).finally(function(){ location.href='/observe/login'; }); }
+function load(){
+  fetch('/observe/api/system/versions',{headers:{'Accept':'application/json'}})
+    .then(function(r){ if(r.status===401){ location.href='/observe/login?next=/observe/versions'; throw new Error('Sessão expirada'); } if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+    .then(function(d){
+      var groups = d.groups || [];
+      var total = 0;
+      groups.forEach(function(g){ total += (g.components || []).length; });
+      document.getElementById('stat-components').textContent = total;
+      document.getElementById('stat-groups').textContent = groups.length;
+      document.getElementById('stat-version').textContent = 'v' + d.version;
+      document.getElementById('stack-sub').textContent = 'Stack ' + esc(d.stack) + ' · ' + total + ' componentes em ' + groups.length + ' grupos.';
+      document.getElementById('stack-updated').textContent = 'Atualizado em ' + new Date(d.generated_at).toLocaleString('pt-BR');
+      var h = '';
+      groups.forEach(function(g){
+        var meta = GROUP_META[g.id] || { icon: '📦', cls: 'g-core' };
+        var comps = g.components || [];
+        h += '<article class="group-card ' + meta.cls + '">';
+        h += '<header class="group-head"><div class="group-icon">' + meta.icon + '</div>';
+        h += '<div class="group-meta"><h2>' + esc(g.label) + '</h2><span>' + comps.length + ' componentes</span></div></header>';
+        h += '<ul class="components">';
+        comps.forEach(function(c){
+          h += '<li><span class="c-name">' + esc(c.name) + '</span><span class="c-ver">' + esc(c.version) + '</span></li>';
+        });
+        h += '</ul></article>';
+      });
+      document.getElementById('content').innerHTML = h || '<div class="error">Nenhuma informação de versão disponível.</div>';
+    })
+    .catch(function(e){ document.getElementById('content').innerHTML='<div class="error">' + esc(e.message) + '</div>'; });
+}
+load();
 </script>
 </body>
 </html>`;

@@ -839,9 +839,11 @@ services:
       r-observe-loki:
         condition: service_healthy
     healthcheck:
+      # `alloy fmt --test` valida a config; sob limites de CPU (0.25) pode
+      # demorar mais que 5s — timeout elevado para evitar falsos "unhealthy".
       test: ["CMD", "/bin/alloy", "fmt", "--test", "/etc/alloy/config.alloy"]
-      interval: 30s
-      timeout: 5s
+      interval: 60s
+      timeout: 30s
       retries: 5
       start_period: 15s
 

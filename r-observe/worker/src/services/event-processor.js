@@ -9,7 +9,7 @@ const { getTenantId } = require('../shared/tenant-context');
  * Extraído de index.js para reduzir o tamanho do arquivo principal.
  */
 
-function createEventProcessor({ db, remediation, icinga, log, config }) {
+function createEventProcessor({ db, remediation, icinga, whatsapp, log, config }) {
   const {
     AI_ENABLED,
     AI_SERVICE_URL,
@@ -269,6 +269,11 @@ function createEventProcessor({ db, remediation, icinga, log, config }) {
     );
 
     log('info', 'Incident created', { incident_id: incidentId, title, severity });
+
+    // Notificação WhatsApp (fire-and-forget; o próprio notifier trata falhas).
+    if (whatsapp) {
+      whatsapp.notifyIncident({ id: incidentId, title, severity });
+    }
 
     if (AI_ENABLED) {
       const aiContext = await buildAIContext(hostId, event);

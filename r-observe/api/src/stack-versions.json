@@ -1,0 +1,106 @@
+{
+  "stack": "r-observe",
+  "version": "0.1.0",
+  "groups": [
+    {
+      "id": "core",
+      "label": "Aplicação R-Observe",
+      "components": [
+        {
+          "name": "r-observe-api",
+          "version": "0.1.0"
+        },
+        {
+          "name": "r-observe-worker",
+          "version": "0.1.0"
+        },
+        {
+          "name": "r-observe-ai",
+          "version": "0.1.0"
+        },
+        {
+          "name": "r-observe-agent",
+          "version": "0.1.0"
+        },
+        {
+          "name": "r-observe-discovery",
+          "version": "0.1.0"
+        }
+      ]
+    },
+    {
+      "id": "monitoring",
+      "label": "Observabilidade",
+      "components": [
+        {
+          "name": "Prometheus",
+          "version": "v3.13.1-distroless"
+        },
+        {
+          "name": "Loki",
+          "version": "3.7.2"
+        },
+        {
+          "name": "Grafana",
+          "version": "13.1.2"
+        },
+        {
+          "name": "Grafana Alloy",
+          "version": "1.18.0"
+        },
+        {
+          "name": "OpenTelemetry Collector",
+          "version": "0.158.0"
+        },
+        {
+          "name": "postgres-exporter",
+          "version": "0.20.1"
+        },
+        {
+          "name": "redis-exporter",
+          "version": "v1.88.0"
+        },
+        {
+          "name": "snmp-exporter",
+          "version": "0.30.1"
+        }
+      ]
+    },
+    {
+      "id": "icinga",
+      "label": "Icinga",
+      "components": [
+        {
+          "name": "Icinga 2",
+          "version": "2.16.4"
+        },
+        {
+          "name": "Icinga DB",
+          "version": "1.5.1"
+        },
+        {
+          "name": "Icinga Web 2",
+          "version": "2.14"
+        }
+      ]
+    },
+    {
+      "id": "data",
+      "label": "Dados e infraestrutura",
+      "components": [
+        {
+          "name": "PostgreSQL",
+          "version": "16.14-alpine3.24"
+        },
+        {
+          "name": "Redis",
+          "version": "7-alpine"
+        },
+        {
+          "name": "Nginx (proxy)",
+          "version": "1.30.4-alpine3.24"
+        }
+      ]
+    }
+  ]
+}

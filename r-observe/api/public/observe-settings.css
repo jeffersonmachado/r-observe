@@ -333,3 +333,36 @@ body {
 .slider-row { display: flex; align-items: center; gap: .8rem; }
 .slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
 .slider-row .slider-value { min-width: 3rem; text-align: right; font-size: .85rem; font-weight: 600; color: var(--text); }
+
+/* ── WhatsApp help ─────────────────────────────────────────────────────── */
+.wa-help {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: rgba(204, 18, 18, 0.06);
+  padding: .8rem 1rem;
+  margin-bottom: 1.25rem;
+}
+.wa-help summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: .88rem;
+  color: var(--text);
+  user-select: none;
+}
+.wa-help summary:hover { color: var(--accent-h); }
+.wa-help-steps { margin: .7rem 0 0 1.1rem; display: flex; flex-direction: column; gap: .45rem; }
+.wa-help-steps li { font-size: .8rem; color: var(--text); line-height: 1.55; }
+.wa-help-steps li strong { color: var(--text); }
+.wa-help code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 .35rem;
+  font-family: Consolas, monospace;
+  font-size: .74rem;
+  color: var(--accent-h);
+}
+.wa-help-links { display: flex; gap: 1rem; margin-top: .7rem; flex-wrap: wrap; }
+.wa-help-links a { font-size: .78rem; color: var(--accent-h); text-decoration: none; }
+.wa-help-links a:hover { text-decoration: underline; }

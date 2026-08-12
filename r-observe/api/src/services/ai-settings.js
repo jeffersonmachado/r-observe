@@ -185,6 +185,32 @@ function createAISettingsService({
     return { synced: true, changed: true };
   }
 
+  // Valida a chave diretamente no provider antes de persistir.
+  // Retorna { valid:false } apenas quando o provider rejeita a autenticação (401/403);
+  // falha de rede/timeout não bloqueia (retorna valid:true + reason:'unreachable').
+  const PROVIDER_KEY_ENDPOINTS = {
+    openai:    { url: 'https://api.openai.com/v1/models',    header: 'Authorization', auth: (k) => `Bearer ${k}` },
+    deepseek:  { url: 'https://api.deepseek.com/v1/models',  header: 'Authorization', auth: (k) => `Bearer ${k}` },
+    anthropic: { url: 'https://api.anthropic.com/v1/models', header: 'x-api-key',     auth: (k) => k, extra: { 'anthropic-version': '2023-06-01' } },
+  };
+
+  async function validateProviderKey(provider, apiKey) {
+    const cfg = PROVIDER_KEY_ENDPOINTS[provider];
+    if (!cfg || !apiKey) return { valid: true };
+    try {
+      const resp = await fetchImpl(cfg.url, {
+        headers: { [cfg.header]: cfg.auth(apiKey), ...(cfg.extra || {}) },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (resp.status === 401 || resp.status === 403) {
+        return { valid: false, reason: 'authentication_failed', status: resp.status };
+      }
+      return { valid: true };
+    } catch (e) {
+      return { valid: true, reason: 'unreachable', detail: e.message };
+    }
+  }
+
   return {
     proxyToAI,
     aiProxyFailureExtra,
@@ -193,6 +219,7 @@ function createAISettingsService({
     upsertPersistedAISettings,
     applyPersistedAISettingsOnStartup,
     reconcilePersistedAISettings,
+    validateProviderKey,
   };
 }
 
