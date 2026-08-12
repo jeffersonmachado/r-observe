@@ -829,6 +829,7 @@ services:
     command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
     volumes:
       - ./observe/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ./observe/otel/healthcheck:/healthcheck:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - r-observe-alloy-data:/var/lib/alloy/data
     tmpfs:
@@ -839,13 +840,14 @@ services:
       r-observe-loki:
         condition: service_healthy
     healthcheck:
-      # `alloy fmt --test` valida a config; sob limites de CPU (0.25) pode
-      # demorar mais que 5s — timeout elevado para evitar falsos "unhealthy".
-      test: ["CMD", "/bin/alloy", "fmt", "--test", "/etc/alloy/config.alloy"]
-      interval: 60s
-      timeout: 30s
-      retries: 5
-      start_period: 15s
+      # `alloy fmt --test` demorava >7min sob 0.25 CPU (falso unhealthy) e
+      # roubava CPU do próprio Alloy. Binário estático consulta o endpoint
+      # nativo /-/healthy (porta 12345) em milissegundos.
+      test: ["CMD", "/healthcheck", "127.0.0.1", "12345", "/-/healthy", "healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ─── GRAFANA ─────────────────────────────────────────────────────────────────
   r-observe-grafana:
@@ -919,7 +921,7 @@ services:
       # A imagem é distroless (sem shell/wget). `validate` carregava todos os
       # componentes contrib e demorava >70s sob 0.25 CPU (falso unhealthy).
       # Binário estático consulta o endpoint health_check (127.0.0.1:13133).
-      test: ["CMD", "/healthcheck"]
+      test: ["CMD", "/healthcheck", "127.0.0.1", "13133", "/", "Server available"]
       interval: 30s
       timeout: 10s
       retries: 3
