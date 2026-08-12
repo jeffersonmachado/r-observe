@@ -2919,8 +2919,9 @@ function loadModels(provider,currentModel){
 function loadAIStatus(){
   fetch(API+'/ai/settings',{headers:getHeaders()}).then(r=>r.json()).then(d=>{
     _aiProvider=d.provider||'mock';_aiModel=d.model||'auto';_aiLoaded=true;
-    document.getElementById('save-ai-btn').disabled=false;
-    renderAI(document.getElementById('settings-panel'));
+    const btn=document.getElementById('save-ai-btn');
+    if(btn) btn.disabled=false;
+    if(_activeSettingsTab==='ai') renderAI(document.getElementById('settings-panel'));
   }).catch(()=>{});
 }
 async function saveAISettings(){
@@ -2973,6 +2974,7 @@ document.getElementById('settings-panel').innerHTML='<div class="loading-state" 
 loadStatus();
 setInterval(loadStatus,30000);
 loadWhatsApp();
+loadAIStatus();
 </script>
 </body>
 </html>`;
