@@ -893,7 +893,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 40s
+      start_period: 90s
 
   # ─── OPENTELEMETRY COLLECTOR ─────────────────────────────────────────────────
   r-observe-otel-collector:
@@ -915,9 +915,11 @@ services:
       - observe-monitoring
       - observe-internal
     healthcheck:
+      # `validate` carrega todos os componentes contrib; sob 0.25 CPU pode
+      # passar de 10s — timeout elevado para evitar falso unhealthy.
       test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otel-collector-config.yml"]
       interval: 30s
-      timeout: 10s
+      timeout: 30s
       retries: 5
       start_period: 20s
 
