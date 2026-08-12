@@ -909,19 +909,21 @@ services:
     command: ["--config=/etc/otel-collector-config.yml"]
     volumes:
       - ./observe/otel/otel-collector-config.yml:/etc/otel-collector-config.yml:ro
+      - ./observe/otel/healthcheck:/healthcheck:ro
     tmpfs:
       - /tmp
     networks:
       - observe-monitoring
       - observe-internal
     healthcheck:
-      # `validate` carrega todos os componentes contrib; sob 0.25 CPU pode
-      # passar de 10s — timeout elevado para evitar falso unhealthy.
-      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otel-collector-config.yml"]
+      # A imagem é distroless (sem shell/wget). `validate` carregava todos os
+      # componentes contrib e demorava >70s sob 0.25 CPU (falso unhealthy).
+      # Binário estático consulta o endpoint health_check (127.0.0.1:13133).
+      test: ["CMD", "/healthcheck"]
       interval: 30s
-      timeout: 30s
-      retries: 5
-      start_period: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ─── NGINX REVERSE PROXY ─────────────────────────────────────────────────────
   r-observe-proxy:
