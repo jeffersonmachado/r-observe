@@ -2518,7 +2518,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
   <!-- Status Cards -->
   <div class="status-cards" id="status-cards">
     <div class="status-card ok"><div class="card-value" id="st-ai">—</div><div class="card-label">IA Provider</div></div>
-    <div class="status-card ok"><div class="card-value" id="st-agents">0/0</div><div class="card-label">Agentes Online</div></div>
+    <div class="status-card ok"><div class="card-value" id="st-agents">0/0</div><div class="card-label">Agentes Discovery</div></div>
     <div class="status-card ok"><div class="card-value" id="st-assets">0</div><div class="card-label">Ativos Monitorados</div></div>
   </div>
 
@@ -2542,7 +2542,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
       <div class="aside-panel">
         <div class="panel-title">Status ao Vivo</div>
         <div class="status-bar"><span class="dot ok" id="sd-ai"></span><span class="status-text" id="st-ai-text">IA</span><span class="status-value" id="sv-ai">—</span></div>
-        <div class="status-bar" style="margin-top:.5rem"><span class="dot ok" id="sd-agents"></span><span class="status-text">Agentes</span><span class="status-value" id="sv-agents">—</span></div>
+        <div class="status-bar" style="margin-top:.5rem"><span class="dot ok" id="sd-agents"></span><span class="status-text">Agentes Discovery</span><span class="status-value" id="sv-agents">—</span></div>
         <div class="status-bar" style="margin-top:.5rem"><span class="dot ok" id="sd-assets"></span><span class="status-text">Ativos</span><span class="status-value" id="sv-assets">—</span></div>
         <div class="status-bar" style="margin-top:.5rem"><span class="dot ok" id="sd-ports"></span><span class="status-text">Port Change</span><span class="status-value" id="sv-ports">—</span></div>
         <div class="status-bar" style="margin-top:.5rem"><span class="dot ok" id="sd-certs"></span><span class="status-text">Cert Check</span><span class="status-value" id="sv-certs">—</span></div>
@@ -2959,7 +2959,7 @@ function loadStatus(){
     document.getElementById('st-assets').textContent=disc.total_assets||0;
     document.getElementById('sv-ai').textContent=s.ai?.provider||'—';
     document.getElementById('sd-ai').className='dot '+aiCls;
-    document.getElementById('sv-agents').textContent=(ag.online||0)+' online, '+(ag.offline||0)+' offline';
+    document.getElementById('sv-agents').textContent=((ag.total||0)===0)?'0 registrados':((ag.online||0)+' online, '+(ag.offline||0)+' offline');
     document.getElementById('sd-agents').className='dot '+(ag.offline>0?'err':(ag.online>0?'ok':'warn'));
     document.getElementById('sv-assets').textContent=(disc.total_assets||0)+' ativos';
     document.getElementById('sv-ports').textContent=s.discovery?.port_change_detection?'Ativo':'Inativo';
