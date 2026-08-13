@@ -48,8 +48,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 512M
+          cpus: '${OBSERVE_LIMIT_CPU_MAX:-1.0}'
+          memory: ${OBSERVE_LIMIT_MEM_LG:-512M}
     environment:
       POSTGRES_DB: ${OBSERVE_DB_NAME:-observedb}
       POSTGRES_USER: ${OBSERVE_DB_USER:-observe}
@@ -83,8 +83,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.25'
-          memory: 128M
+          cpus: '${OBSERVE_LIMIT_CPU_LOW:-0.25}'
+          memory: ${OBSERVE_LIMIT_MEM_SM:-128M}
     command:
       - redis-server
       - "--save"
@@ -146,8 +146,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 512M
+          cpus: '${OBSERVE_LIMIT_CPU_MAX:-1.0}'
+          memory: ${OBSERVE_LIMIT_MEM_LG:-512M}
     depends_on:
       r-observe-postgres:
         condition: service_healthy
@@ -246,8 +246,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 256M
+          cpus: '${OBSERVE_LIMIT_CPU_MED:-0.5}'
+          memory: ${OBSERVE_LIMIT_MEM_MD:-256M}
     depends_on:
       r-observe-postgres:
         condition: service_healthy
@@ -326,8 +326,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.25'
-          memory: 256M
+          cpus: '${OBSERVE_LIMIT_CPU_LOW:-0.25}'
+          memory: ${OBSERVE_LIMIT_MEM_MD:-256M}
     secrets:
       - source: jwt_api_public
         target: jwt_api_public
@@ -387,8 +387,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.25'
-          memory: 128M
+          cpus: '${OBSERVE_LIMIT_CPU_LOW:-0.25}'
+          memory: ${OBSERVE_LIMIT_MEM_SM:-128M}
     depends_on:
       r-observe-api:
         condition: service_healthy
@@ -460,8 +460,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 256M
+          cpus: '${OBSERVE_LIMIT_CPU_MED:-0.5}'
+          memory: ${OBSERVE_LIMIT_MEM_MD:-256M}
     user: "${OBSERVE_DISCOVERY_UID:-1000}:${OBSERVE_DISCOVERY_GID:-1000}"
     depends_on:
       r-observe-postgres:
@@ -575,8 +575,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.1'
-          memory: 64M
+          cpus: '${OBSERVE_LIMIT_CPU_SMALL:-0.1}'
+          memory: ${OBSERVE_LIMIT_MEM_XS:-64M}
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     tmpfs:
       - /data
@@ -600,8 +600,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.75'
-          memory: 512M
+          cpus: '${OBSERVE_LIMIT_CPU_HIGH:-0.75}'
+          memory: ${OBSERVE_LIMIT_MEM_LG:-512M}
     depends_on:
       r-observe-icinga-redis:
         condition: service_healthy
@@ -640,8 +640,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 256M
+          cpus: '${OBSERVE_LIMIT_CPU_MED:-0.5}'
+          memory: ${OBSERVE_LIMIT_MEM_MD:-256M}
     depends_on:
       r-observe-postgres:
         condition: service_healthy
@@ -682,8 +682,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.25'
-          memory: 256M
+          cpus: '${OBSERVE_LIMIT_CPU_LOW:-0.25}'
+          memory: ${OBSERVE_LIMIT_MEM_MD:-256M}
     depends_on:
       r-observe-icinga2:
         condition: service_healthy
@@ -762,8 +762,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.75'
-          memory: 512M
+          cpus: '${OBSERVE_LIMIT_CPU_HIGH:-0.75}'
+          memory: ${OBSERVE_LIMIT_MEM_LG:-512M}
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -800,8 +800,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 256M
+          cpus: '${OBSERVE_LIMIT_CPU_MAX:-1.0}'
+          memory: ${OBSERVE_LIMIT_MEM_MD:-256M}
     command: ["-config.file=/etc/loki/loki-config.yml"]
     volumes:
       - r-observe-loki-data:/loki
@@ -827,8 +827,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.25'
-          memory: 128M
+          cpus: '${OBSERVE_LIMIT_CPU_LOW:-0.25}'
+          memory: ${OBSERVE_LIMIT_MEM_SM:-128M}
     command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
     volumes:
       - ./observe/alloy/config.alloy:/etc/alloy/config.alloy:ro
@@ -862,8 +862,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 512M
+          cpus: '${OBSERVE_LIMIT_CPU_MED:-0.5}'
+          memory: ${OBSERVE_LIMIT_MEM_LG:-512M}
     depends_on:
       r-observe-prometheus:
         condition: service_healthy
@@ -909,8 +909,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.25'
-          memory: 128M
+          cpus: '${OBSERVE_LIMIT_CPU_LOW:-0.25}'
+          memory: ${OBSERVE_LIMIT_MEM_SM:-128M}
     command: ["--config=/etc/otel-collector-config.yml"]
     volumes:
       - ./observe/otel/otel-collector-config.yml:/etc/otel-collector-config.yml:ro
@@ -939,8 +939,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.25'
-          memory: 64M
+          cpus: '${OBSERVE_LIMIT_CPU_LOW:-0.25}'
+          memory: ${OBSERVE_LIMIT_MEM_XS:-64M}
     depends_on:
       r-observe-api:
         condition: service_healthy
@@ -974,8 +974,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.1'
-          memory: 64M
+          cpus: '${OBSERVE_LIMIT_CPU_SMALL:-0.1}'
+          memory: ${OBSERVE_LIMIT_MEM_XS:-64M}
     environment:
       DATA_SOURCE_NAME: "postgresql://${OBSERVE_DB_EXPORTER_USER:-observe_exporter}:${OBSERVE_DB_EXPORTER_PASSWORD:-${OBSERVE_DB_PASSWORD}}@r-observe-postgres:5432/${OBSERVE_DB_NAME:-observedb}?sslmode=disable"
     depends_on:
@@ -1005,8 +1005,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.1'
-          memory: 64M
+          cpus: '${OBSERVE_LIMIT_CPU_SMALL:-0.1}'
+          memory: ${OBSERVE_LIMIT_MEM_XS:-64M}
     environment:
       REDIS_ADDR: "redis://:${OBSERVE_REDIS_PASSWORD:-}@r-observe-redis:6379"
     depends_on:
@@ -1036,8 +1036,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.1'
-          memory: 64M
+          cpus: '${OBSERVE_LIMIT_CPU_SMALL:-0.1}'
+          memory: ${OBSERVE_LIMIT_MEM_XS:-64M}
     command:
       - --config.file=/etc/snmp_exporter/snmp.yml
       - --config.expand-environment-variables

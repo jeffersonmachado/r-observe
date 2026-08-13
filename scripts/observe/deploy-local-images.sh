@@ -207,6 +207,7 @@ deploy_remote() {
     test -s secrets/jwt_api_private.pem
     docker network inspect dns-consolidated_dns-internal >/dev/null
     docker network inspect infra-mail_default >/dev/null 2>&1 || docker network create infra-mail_default >/dev/null
+    bash scripts/observe/compute-resource-limits.sh --write '$ENV_FILE'
     docker compose -f '$COMPOSE_FILE' --env-file '$ENV_FILE' $profile_args config --quiet
     docker compose -f '$COMPOSE_FILE' --env-file '$ENV_FILE' $profile_args up -d --no-build --pull never --remove-orphans
     bash scripts/observe/ensure-icingaweb-admin.sh

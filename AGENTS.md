@@ -9,6 +9,12 @@
 - `--skip-build` apenas reutiliza imagens locais ja existentes; nunca significa construir remotamente.
 - Antes de concluir um deploy, validar Compose, imagens locais, arquitetura local/remota, containers, healthcheck e smoke test. Nunca exibir senhas ou chaves nos logs.
 
+## Limites de recursos adaptativos
+
+- Os limites de CPU/memória no `docker-compose.observe.yml` referenciam variáveis `OBSERVE_LIMIT_*` (com os valores atuais como default) — **não hardcode novos valores por serviço**.
+- O script `scripts/observe/compute-resource-limits.sh` calcula os limites a partir das características do servidor (CPUs e RAM) e é executado automaticamente a cada deploy (`--write .env.observe`), usando como referência 4 CPUs / 16 GiB.
+- Para testar/forçar manualmente: `OBSERVE_TOTAL_CPUS=8 OBSERVE_TOTAL_MEMORY_MB=32768 bash scripts/observe/compute-resource-limits.sh`.
+
 ## Versões da stack (`/observe/versions`)
 
 - A página de versões (`/observe/versions`) é alimentada por `r-observe/api/src/stack-versions.json`, gerado pelo script `scripts/observe/update-stack-versions.js`.
