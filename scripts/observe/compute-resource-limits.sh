@@ -44,8 +44,8 @@ round_cpu() {
 }
 
 round_mem() {
-  # Arredonda para múltiplo de 16 MiB (formato "512M")
-  awk -v v="$1" 'BEGIN { m = int(v / 16 + 0.5) * 16; printf "%dM", m }'
+  # Arredonda para múltiplo de 64 MiB (valores limpos: 64M, 128M, 256M, 512M...).
+  awk -v v="$1" 'BEGIN { m = int(v / 64 + 0.5) * 64; printf "%dM", m }'
 }
 
 main() {
