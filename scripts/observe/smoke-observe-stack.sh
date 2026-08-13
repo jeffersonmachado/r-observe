@@ -195,17 +195,26 @@ fi
 # ─── Step 5: IA gerou análise ────────────────────────────────────────────────
 step 5 "Verificar análise de IA no incidente"
 
+AI_SUMMARY=""
 if [ -n "$INCIDENT_ID" ]; then
-  INC_DETAIL=$(smoke_curl "${BASE}/incidents/${INCIDENT_ID}" 2>/dev/null || echo "{}")
-  if echo "$INC_DETAIL" | grep -q '"ai_summary"'; then
-    AI_SUMMARY=$(echo "$INC_DETAIL" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('incident',{}).get('ai_summary','')[:80])" 2>/dev/null || echo "")
-    if [ -n "$AI_SUMMARY" ]; then
-      pass "IA gerou análise: ${AI_SUMMARY}..."
-    else
-      warn "Campo ai_summary vazio (IA pode estar desabilitada ou sem provider configurado)"
+  # A análise de IA roda no mesmo ciclo do worker, mas alguns segundos após a
+  # criação do incidente — aguarda até ~20s antes de concluir.
+  AI_MAX_WAIT=20
+  AI_WAITED=0
+  while [ $AI_WAITED -lt $AI_MAX_WAIT ]; do
+    INC_DETAIL=$(smoke_curl "${BASE}/incidents/${INCIDENT_ID}" 2>/dev/null || echo "{}")
+    if echo "$INC_DETAIL" | grep -q '"ai_summary"'; then
+      AI_SUMMARY=$(echo "$INC_DETAIL" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('incident',{}).get('ai_summary','')[:80])" 2>/dev/null || echo "")
+      [ -n "$AI_SUMMARY" ] && break
     fi
+    sleep 2
+    AI_WAITED=$((AI_WAITED+2))
+  done
+
+  if [ -n "$AI_SUMMARY" ]; then
+    pass "IA gerou análise: ${AI_SUMMARY}..."
   else
-    warn "Campo ai_summary não encontrado (IA pode estar desabilitada)"
+    warn "Campo ai_summary vazio após ${AI_MAX_WAIT}s (IA pode estar desabilitada ou sem provider configurado)"
   fi
 fi
 
