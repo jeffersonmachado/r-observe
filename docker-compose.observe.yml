@@ -412,6 +412,7 @@ services:
       OBSERVE_DOCKER_PROJECTS: ${OBSERVE_DOCKER_PROJECTS:-infra,infra-httpd,infra-mail,dns-consolidated,edge-sni}
       OBSERVE_DOCKER_IGNORE_CONTAINERS: ${OBSERVE_DOCKER_IGNORE_CONTAINERS:-results-mail-certs-bootstrap}
       DISK_WARN_PERCENT: ${OBSERVE_AGENT_DISK_WARN:-80}
+      DISK_PATH: ${OBSERVE_DISK_PATH:-/host}
       LOG_LEVEL: ${OBSERVE_LOG_LEVEL:-info}
       TZ: ${TZ:-America/Sao_Paulo}
       # ── Checks HTTP externos (label=url, separados por vírgula) ───────────────
@@ -430,6 +431,8 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: product=r-observe,environment=${NODE_ENV:-production}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Root do host em modo somente-leitura p/ monitorar o disco real do servidor
+      - /:/host:ro
     group_add:
       - "${DOCKER_SOCKET_GID:-137}"
     tmpfs:

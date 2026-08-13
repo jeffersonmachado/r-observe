@@ -19,6 +19,9 @@ const API_URL = process.env.API_URL || 'http://observe-api:3000';
 const API_BASE_PATH = process.env.API_BASE_PATH || '/observe/api';
 const CHECK_INTERVAL_MS = parseInt(process.env.CHECK_INTERVAL_MS || '60000', 10);
 const DISK_WARN_PERCENT = parseInt(process.env.DISK_WARN_PERCENT || '80', 10);
+// Caminho cujo uso de disco será monitorado. Em container, aponte para o
+// bind-mount do root do host (ex.: /host) para monitorar o disco do servidor.
+const DISK_PATH = process.env.DISK_PATH || '/';
 const AGENT_ID = process.env.AGENT_ID || 'local-agent-01';
 const AGENT_HOST_ADDRESS = process.env.AGENT_HOST_ADDRESS || '';
 const DOCKER_PROJECTS = (process.env.OBSERVE_DOCKER_PROJECTS || '')
@@ -274,7 +277,7 @@ async function checkContainers() {
 // Check: uso de disco
 async function checkDisk() {
   try {
-    const { stdout } = await execFileAsync('df', ['-h', '/'], { timeout: 5000 });
+    const { stdout } = await execFileAsync('df', ['-h', DISK_PATH], { timeout: 5000 });
     const lines = stdout.trim().split('\n');
     // Linha 1: cabeçalho, linha 2: dados
     const data = lines[1]?.split(/\s+/);
