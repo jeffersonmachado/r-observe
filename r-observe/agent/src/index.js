@@ -22,6 +22,9 @@ const DISK_WARN_PERCENT = parseInt(process.env.DISK_WARN_PERCENT || '80', 10);
 // Caminho cujo uso de disco será monitorado. Em container, aponte para o
 // bind-mount do root do host (ex.: /host) para monitorar o disco do servidor.
 const DISK_PATH = process.env.DISK_PATH || '/';
+// CPU média (em % de um core) acima da qual um container unhealthy é classificado
+// como possível loop ocupado.
+const CPU_LOOP_THRESHOLD = parseFloat(process.env.CPU_LOOP_THRESHOLD || '50', 10);
 const AGENT_ID = process.env.AGENT_ID || 'local-agent-01';
 const AGENT_HOST_ADDRESS = process.env.AGENT_HOST_ADDRESS || '';
 const DOCKER_PROJECTS = (process.env.OBSERVE_DOCKER_PROJECTS || '')
@@ -174,6 +177,41 @@ function containerHealth(container) {
   return health || null;
 }
 
+// Coleta diagnóstico de um container unhealthy para identificar a causa:
+// saída do último healthcheck (timeout/ECONNREFUSED) + CPU média desde o start.
+async function containerUnhealthyDiagnostics(containerId) {
+  try {
+    const cont = docker.getContainer(containerId);
+    const [inspect, stats] = await Promise.all([
+      cont.inspect().catch(() => null),
+      cont.stats({ stream: false }).catch(() => null),
+    ]);
+    if (!inspect) return null;
+
+    const startedAt = Date.parse(inspect.State?.StartedAt || 0) || Date.now();
+    const uptimeSeconds = Math.max(1, (Date.now() - startedAt) / 1000);
+    // total_usage é em nanosegundos de CPU consumida desde o start.
+    const totalUsageNs = stats?.cpu_stats?.cpu_usage?.total_usage || 0;
+    const cpuPercent = (totalUsageNs / 1e9) / uptimeSeconds * 100;
+
+    const lastHealth = (inspect.State?.Health?.Log || []).slice(-1)[0] || null;
+    const healthOutput = String(lastHealth?.Output || '').trim();
+
+    let cause = 'healthcheck falhando';
+    if (/timed out|timeout|exceeded/i.test(healthOutput)) {
+      cause = 'healthcheck excedeu timeout — possível loop ocupado (event loop bloqueado)';
+    } else if (/connection refused|ECONNREFUSED|refused/i.test(healthOutput)) {
+      cause = 'porta não escutando — processo parado ou porta divergente';
+    } else if (cpuPercent >= CPU_LOOP_THRESHOLD) {
+      cause = 'CPU alto — possível loop ocupado';
+    }
+
+    return { cpuPercent, uptimeSeconds, cause, healthOutput: healthOutput.slice(0, 200) };
+  } catch (_e) {
+    return null;
+  }
+}
+
 function normalizePorts(ports = []) {
   return ports.map(p => ({
     private_port: p.PrivatePort,
@@ -258,13 +296,22 @@ async function checkContainers() {
       }
       // Healthcheck failing
       if (c.Status && c.Status.includes('unhealthy')) {
-        log('warn', 'Container unhealthy', { name });
+        const diag = await containerUnhealthyDiagnostics(c.Id).catch(() => null);
+        log('warn', 'Container unhealthy', {
+          name,
+          cause: diag?.cause || null,
+          cpuPercent: diag ? Math.round(diag.cpuPercent) : null,
+        });
         await sendEvent('container.unhealthy', {
           severity: 'warning',
           service: name,
           container_id: c.Id.slice(0, 12),
           status: c.Status,
-          message: `Container ${name} healthcheck failing`,
+          cause: diag?.cause || 'healthcheck falhando',
+          cpu_percent: diag ? Math.round(diag.cpuPercent * 10) / 10 : null,
+          uptime_seconds: diag ? Math.round(diag.uptimeSeconds) : null,
+          health_output: diag?.healthOutput || null,
+          message: `${name} ${diag?.cause || 'healthcheck falhando'}`,
         });
       }
     }

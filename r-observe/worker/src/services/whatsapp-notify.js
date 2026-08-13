@@ -28,7 +28,8 @@ function createWhatsAppNotifier({ db, log }) {
       if (!severityEnabled(cfg.severity_filter || 'critical', incident.severity)) return;
 
       const icon = incident.severity === 'critical' ? '\u{1F6A8}' : incident.severity === 'warning' ? '\u26A0\uFE0F' : '\u2139\uFE0F';
-      const text = `${icon} *R-Observe*\n${incident.title}\nSeveridade: ${incident.severity}`;
+      const causeLine = incident.cause ? `\nCausa: ${incident.cause}` : '';
+      const text = `${icon} *R-Observe*\n${incident.title}\nSeveridade: ${incident.severity}${causeLine}`;
 
       await sendWhatsAppMessage({
         accessToken: cfg.access_token,

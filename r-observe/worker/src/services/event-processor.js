@@ -272,7 +272,7 @@ function createEventProcessor({ db, remediation, icinga, whatsapp, log, config }
 
     // Notificação WhatsApp (fire-and-forget; o próprio notifier trata falhas).
     if (whatsapp) {
-      whatsapp.notifyIncident({ id: incidentId, title, severity });
+      whatsapp.notifyIncident({ id: incidentId, title, severity, cause: event.cause });
     }
 
     if (AI_ENABLED) {
