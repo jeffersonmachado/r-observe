@@ -20,7 +20,12 @@ const bodySchemas = require('./schemas/api');
 const { createCorsOptions } = require('./http/cors-options');
 const { createAISettingsService } = require('./services/ai-settings');
 const { createWhatsAppSettingsService } = require('./services/whatsapp-settings');
+const { createWhatsAppQrService } = require('./services/whatsapp-qr');
+const { createWhatsAppBot } = require('./services/whatsapp-bot');
+const { createAIChatClient } = require('./services/ai-client');
+const { createRagContext } = require('./services/rag-context');
 const { sendWhatsAppMessage, validateAccessToken } = require('./shared/whatsapp');
+const { createWhatsAppMessageLog } = require('./shared/whatsapp-message-log');
 const { createLifecycle } = require('./shared/lifecycle');
 const { createHttpErrorHandler } = require('./shared/http-error-handler');
 const { createAuditMiddleware } = require('./audit');
@@ -205,7 +210,10 @@ app.use(helmet({
   },
 }));
 app.use(cors(createCorsOptions(process.env.CORS_ORIGINS)));
-app.use(express.json({ limit: '512kb' }));
+app.use(express.json({
+  limit: '512kb',
+  verify: (req, _res, buf) => { if (buf && buf.length) req.rawBody = buf; },
+}));
 
 // ─── Middleware: request logging + metrics ────────────────────────────────────
 app.use((req, res, next) => {
@@ -285,6 +293,15 @@ const {
 } = createAISettingsService({ db, log, logAIReconcileIssue, processEnv: process.env });
 
 const whatsappSettings = createWhatsAppSettingsService({ db, log });
+const whatsappQr = createWhatsAppQrService({ db, log });
+const whatsappMsgLog = createWhatsAppMessageLog({ db, log });
+const aiChatClient = createAIChatClient({
+  aiServiceUrl: process.env.AI_SERVICE_URL || 'http://r-observe-ai:3000',
+  signToken: signInternalToken,
+  log,
+});
+const ragContext = createRagContext({ db, log });
+const whatsappBot = createWhatsAppBot({ db, log, aiChat: aiChatClient.chat, ragContext });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -1200,6 +1217,18 @@ app.get(`${BASE}/system/status`, requireAuth, async (_req, res) => {
       ai: aiStatus.status === 'fulfilled' ? aiStatus.value : { status: 'unknown' },
       agents: agentStatus.status === 'fulfilled' ? agentStatus.value : { total: 0, online: 0, offline: 0 },
       discovery: discoveryStatus.status === 'fulfilled' ? discoveryStatus.value : { total_assets: 0 },
+      whatsapp: await (async () => {
+        const wa = await whatsappSettings.get().catch(() => null);
+        if (!wa) return null;
+        if (wa.enabled && wa.token_set) {
+          const raw = await whatsappSettings.getRaw().catch(() => null);
+          if (raw && raw.access_token) {
+            const v = await validateAccessToken({ accessToken: raw.access_token, timeoutMs: 6000 }).catch(() => null);
+            wa.token_status = v && v.valid ? 'ok' : 'invalid';
+          }
+        }
+        return wa;
+      })(),
       settings: await (async () => {
         const settings = await systemSettings.load();
         // O provider/modelo real de IA fica em observe_ai_settings (não no
@@ -1233,24 +1262,42 @@ app.get(`${BASE}/system/whatsapp`, requireAuth, requireAdmin, async (_req, res) 
   }
 });
 
-app.put(`${BASE}/system/whatsapp`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
+// Auditoria: últimas mensagens do canal (entrada e saída), mais recentes primeiro.
+// Recibos (status_callback) vão no campo `receipts` e são dobrados na mensagem
+// original pela UI — exceto quando filtrados explicitamente (kind=status_callback).
+app.get(`${BASE}/system/whatsapp/messages`, requireAuth, requireAdmin, async (req, res) => {
   try {
-    const body = req.body || {};
-    // Valida um token recém-informado no Graph API antes de persistir.
-    const newToken = body.access_token ? String(body.access_token).trim() : '';
-    if (newToken && !/^[\u25CF*\u2022]/.test(newToken)) {
-      const validation = await validateAccessToken({ accessToken: newToken });
-      if (!validation.valid) {
-        return res.status(400).json({ error: 'Token inválido: o Meta rejeitou a autenticação.' });
-      }
-    }
-    res.json(await whatsappSettings.update(body));
+    const q = { ...req.query };
+    const wantsReceipts = q.kind === 'status_callback';
+    if (!q.kind) q.excludeKind = 'status_callback';
+    const messages = await whatsappMsgLog.listRecent(q);
+    const receipts = wantsReceipts ? [] : await whatsappMsgLog.listRecent({ kind: 'status_callback', limit: 200 });
+    res.json({ messages, receipts });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post(`${BASE}/system/whatsapp/test`, requireAuth, requireAdmin, async (req, res) => {
+app.put(`${BASE}/system/whatsapp`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
+  try {
+    const body = req.body || {};
+    // Valida um token recém-informado no Graph API antes de persistir.
+    const newToken = body.access_token ? String(body.access_token).trim() : '';
+    const tokenValidated = !!(newToken && !/^[\u25CF*\u2022]/.test(newToken));
+    if (tokenValidated) {
+      const validation = await validateAccessToken({ accessToken: newToken });
+      if (!validation.valid) {
+        return res.status(400).json({ error: 'Token inválido: o Meta rejeitou a autenticação.' });
+      }
+    }
+    const updated = await whatsappSettings.update(body);
+    res.json({ ...updated, token_validated: tokenValidated });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE}/system/whatsapp/test`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
   try {
     const cfg = await whatsappSettings.getRaw();
     if (!cfg || !cfg.enabled) return res.status(400).json({ error: 'WhatsApp não está habilitado.' });
@@ -1258,16 +1305,140 @@ app.post(`${BASE}/system/whatsapp/test`, requireAuth, requireAdmin, async (req, 
       return res.status(400).json({ error: 'Configuração incompleta: preencha token, Phone Number ID e destinatário.' });
     }
     const to = (req.body && req.body.recipient) || cfg.recipient;
-    const result = await sendWhatsAppMessage({
-      accessToken: cfg.access_token,
-      phoneNumberId: cfg.phone_number_id,
-      to,
-      text: '✅ R-Observe: notificação WhatsApp configurada com sucesso.',
-    });
+    const text = (req.body && req.body.text) ? String(req.body.text).slice(0, 4096) : '✅ R-Observe: notificação WhatsApp configurada com sucesso.';
+    let result;
+    try {
+      result = await sendWhatsAppMessage({
+        accessToken: cfg.access_token,
+        phoneNumberId: cfg.phone_number_id,
+        to,
+        text,
+      });
+    } catch (sendErr) {
+      await whatsappMsgLog.record({ direction: 'out', kind: 'test_send', phone: to, body: text, status: 'failed', error: sendErr.message });
+      throw sendErr;
+    }
+    await whatsappMsgLog.record({ direction: 'out', kind: 'test_send', phone: to, body: text, status: 'sent', metaMessageId: result.message_id });
     res.json({ ok: true, ...result });
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
+});
+
+// ─── WhatsApp QR (canal alternativo, não-oficial) ────────────────────────────
+// A API não fala com o bridge (que roda no worker): lê o estado e escreve o
+// comando (enabled/desired_state) em observe_whatsapp_qr_connections.
+app.get(`${BASE}/system/whatsapp/qr/status`, requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    res.json(await whatsappQr.getStatus());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE}/system/whatsapp/qr/connect`, requireAuth, requireAdmin, requireAdminWrite, async (_req, res) => {
+  try {
+    res.json(await whatsappQr.connect());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE}/system/whatsapp/qr/disconnect`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
+  try {
+    res.json(await whatsappQr.disconnect({ enabled: req.body ? req.body.enabled : undefined }));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── WhatsApp Webhook (interação bidirecional) ───────────────────────────────
+// Rotas públicas: a Meta chama diretamente (sem sessão). A autenticidade vem do
+// verify token (GET) e da assinatura HMAC X-Hub-Signature-256 (POST).
+
+function isValidHubSignature(rawBody, signatureHeader, appSecret) {
+  if (!rawBody || !signatureHeader || !appSecret) return false;
+  try {
+    const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+    const provided = String(signatureHeader).replace(/^sha256=/i, '').trim().toLowerCase();
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(provided, 'utf8');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+async function handleIncomingWhatsAppMessage({ from, text, phoneNumberId }) {
+  const cfg = await whatsappSettings.getRaw();
+  if (!cfg || !cfg.enabled || !cfg.access_token || !cfg.phone_number_id) return;
+  const reply = await whatsappBot.handleMessage({ text });
+  if (!reply) return;
+  try {
+    const sent = await sendWhatsAppMessage({
+      accessToken: cfg.access_token,
+      phoneNumberId: phoneNumberId || cfg.phone_number_id,
+      to: from,
+      text: reply,
+    });
+    await whatsappMsgLog.record({ direction: 'out', kind: 'bot_reply', phone: from, body: reply, status: 'sent', metaMessageId: sent.message_id });
+  } catch (e) {
+    await whatsappMsgLog.record({ direction: 'out', kind: 'bot_reply', phone: from, body: reply, status: 'failed', error: e.message });
+    log('warn', 'WhatsApp reply failed', { err: e.message });
+  }
+}
+
+app.get(`${BASE}/whatsapp/webhook`, async (req, res) => {
+  const cfg = await whatsappSettings.getRaw();
+  const verifyToken = cfg?.webhook_verify_token;
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && verifyToken && token === verifyToken && challenge) {
+    return res.status(200).type('text/plain').send(String(challenge));
+  }
+  res.status(403).type('text/plain').send('forbidden');
+});
+
+app.post(`${BASE}/whatsapp/webhook`, async (req, res) => {
+  const cfg = await whatsappSettings.getRaw();
+  // Sempre responde 200 para a Meta encerrar a entrega; falhas são logadas.
+  if (!cfg || !cfg.enabled) return res.sendStatus(200);
+  if (cfg.app_secret) {
+    const sig = req.headers['x-hub-signature-256'];
+    if (!isValidHubSignature(req.rawBody, sig, cfg.app_secret)) {
+      log('warn', 'WhatsApp webhook: assinatura inválida');
+      return res.sendStatus(200);
+    }
+  }
+  const entries = req.body?.entry || [];
+  for (const entry of entries) {
+    for (const change of entry?.changes || []) {
+      const value = change?.value || {};
+      const phoneNumberId = value.metadata?.phone_number_id || cfg.phone_number_id;
+      for (const msg of value.messages || []) {
+        if (msg.type !== 'text') continue;
+        const from = msg.from;
+        const text = msg.text?.body;
+        if (!from || !text) continue;
+        await whatsappMsgLog.record({ direction: 'in', kind: 'webhook_in', phone: from, body: text, status: 'received' });
+        handleIncomingWhatsAppMessage({ from, text, phoneNumberId })
+          .catch((e) => log('warn', 'WhatsApp webhook processing failed', { err: e.message }));
+      }
+      // Recibos da Meta (enviada/entregue/lida/falha) — auditoria de entrega.
+      for (const st of value.statuses || []) {
+        if (!['sent', 'delivered', 'read', 'failed'].includes(st.status)) continue;
+        const stError = st.status === 'failed' && Array.isArray(st.errors) && st.errors[0]
+          ? (st.errors[0].title || st.errors[0].message || 'falha na entrega')
+          : null;
+        await whatsappMsgLog.record({
+          direction: 'out', kind: 'status_callback', phone: st.recipient_id || null,
+          body: null, status: st.status, error: stError, metaMessageId: st.id || null,
+        });
+      }
+    }
+  }
+  res.sendStatus(200);
 });
 
 // ─── Versões da stack ────────────────────────────────────────────────────────
@@ -2520,6 +2691,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
     <div class="status-card ok"><div class="card-value" id="st-ai">—</div><div class="card-label">IA Provider</div></div>
     <div class="status-card ok"><div class="card-value" id="st-agents">0/0</div><div class="card-label">Agentes Discovery</div></div>
     <div class="status-card ok"><div class="card-value" id="st-assets">0</div><div class="card-label">Ativos Monitorados</div></div>
+    <div class="status-card warn"><div class="card-value" id="st-whatsapp">—</div><div class="card-label">WhatsApp</div></div>
   </div>
 
   <!-- Tabs -->
@@ -2531,6 +2703,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
     <button id="settings-tab-certs" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="certs" onclick="switchTab('certs')">🔒 Certs</button>
     <button id="settings-tab-monitoring" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="monitoring" onclick="switchTab('monitoring')">📊 Monitoramento</button>
     <button id="settings-tab-whatsapp" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="whatsapp" onclick="switchTab('whatsapp')">💬 WhatsApp</button>
+    <button id="settings-tab-messages" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="messages" onclick="switchTab('messages')">📨 Mensagens</button>
   </div>
 
   <div class="settings-layout">
@@ -2661,6 +2834,18 @@ function showFeedback(msg,ok){
   setTimeout(()=>{el.textContent='';el.className='';},4000);
 }
 
+function showToast(msg,type){
+  type=type||'ok';
+  const existing=document.querySelector('.toast');
+  if(existing)existing.remove();
+  const el=document.createElement('div');
+  el.className='toast '+type;
+  el.textContent=msg;
+  document.body.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>{el.classList.remove('show');setTimeout(()=>el.remove(),250);},4000);
+}
+
 function switchTab(tab){
   if(_activeSettingsTab && tab!==_activeSettingsTab && _dirty && !confirm('Descartar as alterações não salvas desta seção?')) return;
   if(tab!==_activeSettingsTab){
@@ -2669,8 +2854,8 @@ function switchTab(tab){
     document.getElementById('dirty-status').textContent='Nenhuma alteração pendente.';
   }
   _activeSettingsTab=tab;
-  document.getElementById('save-section-btn').hidden=tab==='ai'||tab==='whatsapp';
-  document.getElementById('dirty-status').hidden=tab==='ai'||tab==='whatsapp';
+  document.getElementById('save-section-btn').hidden=tab==='ai'||tab==='whatsapp'||tab==='messages';
+  document.getElementById('dirty-status').hidden=tab==='ai'||tab==='whatsapp'||tab==='messages';
   document.querySelectorAll('.tab-btn').forEach(b=>{
     const active=b.dataset.tab===tab;
     b.classList.toggle('active',active);
@@ -2678,6 +2863,8 @@ function switchTab(tab){
     b.tabIndex=active?0:-1;
   });
   document.getElementById('settings-panel').setAttribute('aria-labelledby','settings-tab-'+tab);
+  // Aba Mensagens usa a largura toda (tabela de auditoria); demais mantêm o aside.
+  document.querySelector('.settings-layout').classList.toggle('messages-full',tab==='messages');
   const p=document.getElementById('settings-panel');
   if(tab==='discovery') renderDiscovery(p);
   else if(tab==='ai') renderAI(p);
@@ -2686,6 +2873,7 @@ function switchTab(tab){
   else if(tab==='certs') renderCerts(p);
   else if(tab==='monitoring') renderMonitoring(p);
   else if(tab==='whatsapp') renderWhatsApp(p);
+  else if(tab==='messages') renderMessages(p);
 }
 
 document.querySelector('.tabs[role="tablist"]').addEventListener('keydown',event=>{
@@ -2815,18 +3003,19 @@ function renderCerts(el){
 }
 
 // ── WhatsApp Tab ──
-let _whatsapp={enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false};
+let _whatsapp={enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false,webhook_verify_token:'',app_secret_set:false,webhook_path:'/observe/api/whatsapp/webhook'};
 function renderWhatsApp(el){
   const w=_whatsapp||{};
   el.innerHTML='';
   el.appendChild(h('div',{className:'panel-title'},'Notificações via WhatsApp Business'));
-  el.appendChild(h('details',{className:'wa-help',open:''},[
+  el.appendChild(h('details',{className:'wa-help'},[
     h('summary',{},'ℹ️ Como obter o token e os dados'),
     h('ol',{className:'wa-help-steps'},[
       h('li',{},[h('strong',{},'1. App e número: '),'crie um app do tipo Business no ',h('a',{href:'https://developers.facebook.com/apps',target:'_blank',rel:'noopener',style:'color:var(--accent-h)'},'Meta for Developers'),', adicione o produto WhatsApp e conecte um número de teste.']),
       h('li',{},[h('strong',{},'2. Token: '),'em ',h('a',{href:'https://business.facebook.com/',target:'_blank',rel:'noopener',style:'color:var(--accent-h)'},'Business Settings'),' → Usuários → Usuários do sistema → Gerar token, com as permissões ',h('code',{},'whatsapp_business_messaging'),' e ',h('code',{},'whatsapp_business_management'),'.']),
       h('li',{},[h('strong',{},'3. Phone Number ID: '),'em WhatsApp → Gerenciador de API (API Setup), ao lado do número de teste.']),
-      h('li',{},[h('strong',{},'4. Destinatário de teste: '),'adicione o número em API Setup → "To:" (máx. 5) e confirme o opt-in enviando o código a partir do número de teste.'])
+      h('li',{},[h('strong',{},'4. Destinatário de teste: '),'adicione o número em API Setup → "To:" (máx. 5) e confirme o opt-in enviando o código a partir do número de teste.']),
+      h('li',{},[h('strong',{},'5. Webhook (chat): '),'em WhatsApp → Configuration → Webhook, aponte para a URL de callback abaixo e informe o mesmo Verify Token. Assim você poderá enviar comandos (status, alertas, ativos) pelo WhatsApp.'])
     ]),
     h('div',{className:'wa-help-links'},[
       h('a',{href:'https://developers.facebook.com/docs/whatsapp/cloud-api/get-started',target:'_blank',rel:'noopener'},'Guia oficial Cloud API ↗'),
@@ -2861,17 +3050,208 @@ function renderWhatsApp(el){
     h('input',{type:'password',id:'wa-token',value:'',placeholder:w.token_set?'•••••••• (mantido)':'Cole o token de acesso',autocomplete:'new-password',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',oninput:'markDirty()'}),
     h('div',{className:'hint'},w.token_set?'Token salvo — deixe em branco para manter o atual.':'O token é armazenado no banco e nunca é exibido novamente.')
   ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{for:'wa-webhook-url'},'URL de callback (webhook)'),
+    h('input',{type:'text',id:'wa-webhook-url',value:(location.origin||'')+(w.webhook_path||'/observe/api/whatsapp/webhook'),readonly:'',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',onclick:'this.select()'}),
+    h('div',{className:'hint'},'Use esta URL no Meta (deve ser HTTPS público). No deploy remoto, troque o domínio pelo endereço público do R-Observe.')
+  ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{for:'wa-verify-token'},'Verify Token (webhook)'),
+    h('input',{type:'text',id:'wa-verify-token',value:w.webhook_verify_token||'',placeholder:'Token que você informará no Meta',autocomplete:'off',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',oninput:'markDirty()'})
+  ]));
+  el.appendChild(h('div',{className:'field'},[
+    h('label',{for:'wa-app-secret'},'App Secret (assinatura)'),
+    h('input',{type:'password',id:'wa-app-secret',value:'',placeholder:w.app_secret_set?'•••••••• (mantido)':'App Secret do app Meta',autocomplete:'new-password',style:'width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px',oninput:'markDirty()'}),
+    h('div',{className:'hint'},w.app_secret_set?'App Secret salvo — deixe em branco para manter.':'Opcional, mas recomendado: valida a assinatura das mensagens recebidas.')
+  ]));
   el.appendChild(h('div',{className:'actions'},[
     h('button',{className:'btn btn-secondary',type:'button',onclick:'loadWhatsApp()'},'↺ Atualizar'),
-    h('button',{className:'btn btn-secondary',type:'button',id:'wa-test-btn',onclick:'sendWhatsAppTest(event)'},'📱 Enviar teste'),
+    h('button',{className:'btn btn-secondary',type:'button',id:'wa-test-btn',onclick:'openWhatsAppTestModal()'},'📱 Enviar teste'),
     h('button',{className:'btn btn-primary',type:'button',onclick:'saveWhatsApp()'},'Salvar WhatsApp')
   ]));
+  // ── Canal QR (alternativo, não-oficial) ──
+  el.appendChild(h('div',{className:'panel-title',style:'margin-top:1.5rem'},'Canal QR (alternativo, não-oficial)'));
+  el.appendChild(h('div',{className:'hint'},'Conecta um número WhatsApp lendo um QR Code (whatsapp-web.js). Serve como fallback: se a Cloud API acima não estiver configurada, os alertas saem por este canal. O pareamento roda no worker.'));
+  el.appendChild(h('div',{id:'wa-qr-box'}));
+  renderWhatsAppQr();
+  loadWhatsAppQr();
   document.getElementById('tog-wa_enabled').checked=!!w.enabled;
   document.getElementById('wa-severity').value=w.severity_filter||'critical';
 }
+// ── WhatsApp QR (canal alternativo) ──
+let _waQr={enabled:false,status:'disconnected',qrDataUrl:null,qrExpiresAt:null,lastError:null};
+const WA_QR_STATUS_LABELS={pairing:'Aguardando leitura do QR',connected:'Autenticado, sincronizando…',ready:'Conectado',disconnected:'Desconectado',error:'Erro'};
+function renderWhatsAppQr(){
+  const box=document.getElementById('wa-qr-box');
+  if(!box)return;
+  const q=_waQr||{};
+  box.innerHTML='';
+  const chipStyle='display:inline-block;padding:.35rem .6rem;background:var(--bg);border:1px solid var(--border);border-radius:4px';
+  box.appendChild(h('div',{className:'field'},[
+    h('label',{className:'toggle-switch',style:'display:inline-flex;align-items:center;gap:.6rem;cursor:pointer'},[
+      h('input',{type:'checkbox',id:'tog-wa_qr_enabled',onchange:'toggleWhatsAppQr()'}),
+      h('span',{className:'toggle-slider'})
+    ]),
+    h('div',{className:'toggle-desc'},'Habilitar canal QR (requer WHATSAPP_QR_ENABLED=true no worker)')
+  ]));
+  box.appendChild(h('div',{className:'field',style:'display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'},[
+    h('span',{id:'wa-qr-status',style:chipStyle},'Status: '+(WA_QR_STATUS_LABELS[q.status]||q.status||'—')),
+    h('button',{className:'btn btn-secondary',type:'button',id:'wa-qr-connect-btn',onclick:'connectWhatsAppQr()'},'Conectar / Gerar QR'),
+    h('button',{className:'btn btn-secondary',type:'button',id:'wa-qr-disconnect-btn',onclick:'disconnectWhatsAppQr(false)'},'Desconectar')
+  ]));
+  if(q.qrDataUrl){
+    box.appendChild(h('div',{className:'field'},[
+      h('img',{id:'wa-qr-img',src:q.qrDataUrl,alt:'QR Code do WhatsApp',style:'width:220px;height:220px;background:#fff;padding:.5rem;border:1px solid var(--border);border-radius:4px'}),
+      h('div',{className:'hint'},'No WhatsApp: Aparelhos conectados → Conectar aparelho → aponte a câmera para o código.'+(q.qrExpiresAt?(' Válido até '+new Date(q.qrExpiresAt).toLocaleTimeString('pt-BR')+'.'):''))
+    ]));
+  }
+  if(q.lastError)box.appendChild(h('div',{className:'field',id:'wa-qr-error',style:'color:var(--err);font-size:.85rem'},'Último erro: '+q.lastError));
+  const tog=document.getElementById('tog-wa_qr_enabled');
+  if(tog)tog.checked=!!q.enabled;
+}
+function loadWhatsAppQr(){
+  fetch(API+'/system/whatsapp/qr/status',{headers:getHeaders()}).then(r=>r.json()).then(d=>{
+    if(d&&!d.error){_waQr=d;if(_activeSettingsTab==='whatsapp')renderWhatsAppQr();}
+  }).catch(()=>{});
+}
+function connectWhatsAppQr(){
+  fetch(API+'/system/whatsapp/qr/connect',{method:'POST',headers:getHeaders(),body:'{}'}).then(r=>r.json()).then(d=>{
+    if(d&&d.error){showToast('Falha ao conectar: '+d.error,'err');return;}
+    if(d)_waQr=d;
+    renderWhatsAppQr();
+    showToast('Conexão QR solicitada — o código aparece aqui em alguns segundos','ok');
+  }).catch(e=>showToast('Falha ao conectar: '+e.message,'err'));
+}
+function disconnectWhatsAppQr(disable){
+  fetch(API+'/system/whatsapp/qr/disconnect',{method:'POST',headers:getHeaders(),body:JSON.stringify(disable?{enabled:false}:{})}).then(r=>r.json()).then(d=>{
+    if(d&&d.error){showToast('Falha ao desconectar: '+d.error,'err');return;}
+    if(d)_waQr=d;
+    renderWhatsAppQr();
+  }).catch(e=>showToast('Falha ao desconectar: '+e.message,'err'));
+}
+function toggleWhatsAppQr(){
+  const tog=document.getElementById('tog-wa_qr_enabled');
+  if(tog&&tog.checked)connectWhatsAppQr();else disconnectWhatsAppQr(true);
+}
+// ── Mensagens (auditoria WhatsApp) ──
+function renderMessages(el){
+  el.innerHTML='';
+  const waInputStyle='padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px';
+  el.appendChild(h('div',{className:'field',style:'display:flex;gap:.5rem;flex-wrap:wrap;align-items:center'},[
+    h('select',{id:'wa-msg-direction',onchange:'loadWhatsAppMessages(true)',style:waInputStyle+';width:auto'},[
+      h('option',{value:''},'Todas as direções'),
+      h('option',{value:'in'},'↓ Recebidas'),
+      h('option',{value:'out'},'↑ Enviadas')
+    ]),
+    h('select',{id:'wa-msg-kind',onchange:'loadWhatsAppMessages(true)',style:waInputStyle+';width:auto'},[
+      h('option',{value:''},'Todos os tipos'),
+      h('option',{value:'webhook_in'},'Recebida'),
+      h('option',{value:'inbound'},'Recebida (QR)'),
+      h('option',{value:'bot_reply'},'Resposta do bot'),
+      h('option',{value:'incident_notification'},'Alerta de incidente'),
+      h('option',{value:'test_send'},'Teste'),
+      h('option',{value:'status_callback'},'Recibo de entrega')
+    ]),
+    h('select',{id:'wa-msg-status',onchange:'loadWhatsAppMessages(true)',style:waInputStyle+';width:auto'},[
+      h('option',{value:''},'Todos os status'),
+      h('option',{value:'received'},'Recebida'),
+      h('option',{value:'sent'},'Enviada'),
+      h('option',{value:'delivered'},'Entregue'),
+      h('option',{value:'read'},'Lida'),
+      h('option',{value:'failed'},'Falhou')
+    ]),
+    h('input',{type:'search',id:'wa-msg-q',placeholder:'Buscar telefone ou texto…',oninput:'waMsgSearch()',style:waInputStyle+';flex:1;min-width:180px'}),
+    h('button',{className:'btn btn-secondary',type:'button',title:'Atualizar lista',onclick:'loadWhatsAppMessages(true)'},'↺')
+  ]));
+  el.appendChild(h('div',{id:'wa-messages',style:'overflow-x:auto'},'Carregando…'));
+  el.appendChild(h('div',{className:'actions',style:'margin-top:.5rem'},[
+    h('button',{className:'btn btn-secondary',type:'button',id:'wa-msg-more',onclick:'loadWhatsAppMessages(false)'},'Carregar mais')
+  ]));
+  loadWhatsAppMessages(true);
+}
+const WA_KIND_LABELS={webhook_in:'Recebida',inbound:'Recebida',bot_reply:'Resposta do bot',incident_notification:'Alerta de incidente',test_send:'Teste',status_callback:'Recibo de entrega'};
+const WA_STATUS_LABELS={received:'Recebida',sent:'Enviada',failed:'Falhou',delivered:'Entregue',read:'Lida'};
+let _waMsgRows=[];let _waMsgOffset=0;let _waMsgTotal=0;let _waMsgSearchTimer=null;let _waReceipts=[];
+function waMsgSearch(){clearTimeout(_waMsgSearchTimer);_waMsgSearchTimer=setTimeout(()=>loadWhatsAppMessages(true),400);}
+function loadWhatsAppMessages(reset=true){
+  const box=document.getElementById('wa-messages');
+  if(!box)return;
+  if(reset){_waMsgRows=[];_waMsgOffset=0;}
+  const p=new URLSearchParams({limit:'20',offset:String(_waMsgOffset)});
+  const dir=document.getElementById('wa-msg-direction');
+  const kind=document.getElementById('wa-msg-kind');
+  const st=document.getElementById('wa-msg-status');
+  const q=document.getElementById('wa-msg-q');
+  if(dir&&dir.value)p.set('direction',dir.value);
+  if(kind&&kind.value)p.set('kind',kind.value);
+  if(st&&st.value)p.set('status',st.value);
+  if(q&&q.value.trim())p.set('q',q.value.trim());
+  fetch(API+'/system/whatsapp/messages?'+p.toString(),{headers:getHeaders()}).then(r=>r.json()).then(d=>{
+    const rows=(d&&d.messages)||[];
+    if(d&&d.receipts)_waReceipts=d.receipts;
+    _waMsgRows=_waMsgRows.concat(rows);
+    _waMsgOffset+=rows.length;
+    if(rows.length)_waMsgTotal=Number(rows[0].total||0);else if(reset)_waMsgTotal=0;
+    renderWhatsAppMessages(box);
+  }).catch(()=>{
+    if(_waMsgRows.length)return;
+    box.innerHTML='';box.appendChild(h('div',{className:'hint'},'Falha ao carregar mensagens.'));
+  });
+}
+function waReceiptsOf(m){
+  if(m.direction!=='out'||m.kind==='status_callback'||!m.meta_message_id)return null;
+  const rs=_waReceipts.filter(r=>r.meta_message_id===m.meta_message_id);
+  if(!rs.length)return null;
+  const prio={failed:4,read:3,delivered:2,sent:1};
+  return rs.sort((a,b)=>(prio[b.status]||0)-(prio[a.status]||0));
+}
+function renderWhatsAppMessages(box){
+  box.innerHTML='';
+  if(!_waMsgRows.length){box.appendChild(h('div',{className:'hint'},'Nenhuma mensagem encontrada.'));}
+  else{
+    const cellStyle='padding:.35rem .5rem;border-bottom:1px solid var(--border);vertical-align:top';
+    const table=h('table',{style:'width:100%;border-collapse:collapse;font-size:.85rem'});
+    const head=h('tr',{style:'text-align:left;color:var(--muted)'});
+    ['Quando','Tipo','Telefone','Status','Mensagem'].forEach(t=>head.appendChild(h('th',{style:'padding:.35rem .5rem;border-bottom:1px solid var(--border)'},t)));
+    table.appendChild(head);
+    _waMsgRows.forEach(m=>{
+      const tr=h('tr',{});
+      const dt=m.created_at?new Date(m.created_at).toLocaleString('pt-BR'):'—';
+      const statusCls=m.status==='failed'?'var(--err)':'var(--ok)';
+      tr.appendChild(h('td',{style:cellStyle+';white-space:nowrap'},dt));
+      tr.appendChild(h('td',{style:cellStyle+';white-space:nowrap'},(m.direction==='in'?'↓ ':'↑ ')+(WA_KIND_LABELS[m.kind]||m.kind)+(m.channel==='qr'?' ·QR':'')));
+      tr.appendChild(h('td',{style:cellStyle+';white-space:nowrap'},m.phone||'—'));
+      const stTd=h('td',{style:cellStyle});
+      const rc=waReceiptsOf(m);
+      if(rc){
+        const top=rc[0];
+        const timeline=rc.slice().sort((a,b)=>new Date(a.created_at)-new Date(b.created_at))
+          .map(r=>(WA_STATUS_LABELS[r.status]||r.status)+' — '+new Date(r.created_at).toLocaleString('pt-BR')+(r.error?'\\n'+r.error:'')).join('\\n');
+        const tick=top.status==='failed'?'⚠':(top.status==='sent'?'✓':'✓✓');
+        const color=top.status==='failed'?'var(--err)':(top.status==='read'?'#53bdeb':'var(--muted)');
+        stTd.appendChild(h('span',{style:'color:'+color+';cursor:help',title:timeline},tick+' '+(WA_STATUS_LABELS[top.status]||top.status)));
+        if(top.status==='failed'&&top.error)stTd.appendChild(h('div',{style:'color:var(--err);font-size:.75rem'},top.error));
+      }else{
+        stTd.appendChild(h('span',{style:'color:'+statusCls},WA_STATUS_LABELS[m.status]||m.status));
+        if(m.status==='failed'&&m.error)stTd.appendChild(h('div',{style:'color:var(--err);font-size:.75rem'},m.error));
+      }
+      tr.appendChild(stTd);
+      const bodyText=m.body||(m.kind==='status_callback'&&m.meta_message_id?'msg: '+m.meta_message_id:'');
+      tr.appendChild(h('td',{style:cellStyle+';max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',title:m.body||m.meta_message_id||''},bodyText));
+      table.appendChild(tr);
+    });
+    box.appendChild(table);
+  }
+  const more=document.getElementById('wa-msg-more');
+  if(more){
+    const hasMore=_waMsgOffset<_waMsgTotal;
+    more.disabled=!hasMore;
+    more.textContent=hasMore?('Carregar mais ('+_waMsgOffset+'/'+_waMsgTotal+')'):('Fim da lista ('+_waMsgTotal+')');
+  }
+}
 function loadWhatsApp(){
   fetch(API+'/system/whatsapp',{headers:getHeaders()}).then(r=>r.json()).then(d=>{
-    _whatsapp=(d&&!d.error)?d:{enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false};
+    _whatsapp=(d&&!d.error)?d:{enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false,webhook_verify_token:'',app_secret_set:false,webhook_path:'/observe/api/whatsapp/webhook'};
     if(_activeSettingsTab==='whatsapp') renderWhatsApp(document.getElementById('settings-panel'));
   }).catch(e=>{ if(_activeSettingsTab==='whatsapp') showFeedback('Falha ao carregar WhatsApp: '+e.message,false); });
 }
@@ -2881,27 +3261,67 @@ function saveWhatsApp(){
     phone_number_id:document.getElementById('wa-phone').value.trim(),
     recipient:document.getElementById('wa-recipient').value.trim(),
     severity_filter:document.getElementById('wa-severity').value,
-    access_token:document.getElementById('wa-token').value.trim()
+    access_token:document.getElementById('wa-token').value.trim(),
+    webhook_verify_token:document.getElementById('wa-verify-token').value.trim(),
+    app_secret:document.getElementById('wa-app-secret').value.trim()
   };
   fetch(API+'/system/whatsapp',{method:'PUT',headers:getHeaders(),body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
-      if(d.error){showFeedback('Erro: '+d.error,false);return;}
+      if(d.error){showFeedback('Erro: '+d.error,false);showToast('Erro: '+d.error,'err');return;}
       _whatsapp=d;_dirty=false;
       document.getElementById('save-section-btn').disabled=true;
       document.getElementById('dirty-status').textContent='Nenhuma alteração pendente.';
-      showFeedback('Configuração WhatsApp salva',true);
+      showToast(d.token_validated?'Token validado e salvo ✓':'Configuração WhatsApp salva','ok');
       renderWhatsApp(document.getElementById('settings-panel'));
+      loadStatus(); // atualiza o card de status do WhatsApp
     }).catch(e=>showFeedback('Erro: '+e.message,false));
 }
-function sendWhatsAppTest(ev){
-  const btn=(ev&&ev.target)?ev.target:document.getElementById('wa-test-btn');
-  btn.disabled=true;
-  fetch(API+'/system/whatsapp/test',{method:'POST',headers:getHeaders(),body:JSON.stringify({})})
+const WA_DEFAULT_TEST_MSG = '✅ R-Observe: notificação WhatsApp configurada com sucesso.';
+function closeWhatsAppTestModal(){
+  const el=document.getElementById('wa-test-modal');
+  if(el)el.remove();
+}
+function openWhatsAppTestModal(){
+  closeWhatsAppTestModal();
+  const overlay=document.createElement('div');
+  overlay.className='modal-overlay';
+  overlay.id='wa-test-modal';
+  const box=document.createElement('div');
+  box.className='modal';
+  const title=document.createElement('div');
+  title.className='modal-title';
+  title.textContent='Enviar mensagem de teste';
+  const ta=document.createElement('textarea');
+  ta.id='wa-test-text';
+  ta.className='modal-textarea';
+  ta.rows=4;
+  ta.value=WA_DEFAULT_TEST_MSG;
+  const actions=document.createElement('div');
+  actions.className='modal-actions';
+  const cancel=document.createElement('button');
+  cancel.className='btn btn-secondary';cancel.type='button';cancel.textContent='Cancelar';
+  cancel.onclick=closeWhatsAppTestModal;
+  const send=document.createElement('button');
+  send.className='btn btn-primary';send.type='button';send.id='wa-test-send';send.textContent='Enviar';
+  send.onclick=confirmSendWhatsAppTest;
+  actions.appendChild(cancel);actions.appendChild(send);
+  box.appendChild(title);box.appendChild(ta);box.appendChild(actions);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  ta.focus();ta.select();
+}
+function confirmSendWhatsAppTest(){
+  const ta=document.getElementById('wa-test-text');
+  const btn=document.getElementById('wa-test-send');
+  const text=(ta?ta.value:'').trim();
+  if(!text){showFeedback('Digite uma mensagem para enviar',false);return;}
+  if(btn)btn.disabled=true;
+  fetch(API+'/system/whatsapp/test',{method:'POST',headers:getHeaders(),body:JSON.stringify({text})})
     .then(r=>r.json()).then(d=>{
-      if(d.error){showFeedback('Falha no teste: '+d.error,false);}
-      else showFeedback('Mensagem de teste enviada!',true);
-    }).catch(e=>showFeedback('Falha no teste: '+e.message,false))
-    .finally(()=>{btn.disabled=false;});
+      if(d.error){showFeedback('Falha no teste: '+d.error,false);showToast('Falha no teste: '+d.error,'err');loadWhatsAppMessages();}
+      else{showFeedback('Mensagem de teste enviada!',true);showToast('Mensagem de teste enviada!','ok');closeWhatsAppTestModal();loadWhatsAppMessages();}
+    }).catch(e=>{showFeedback('Falha no teste: '+e.message,false);showToast('Falha no teste: '+e.message,'err');})
+    .finally(()=>{if(btn)btn.disabled=false;});
 }
 
 // ── AI helpers ──
@@ -2957,6 +3377,19 @@ function loadStatus(){
     if (aiCard) aiCard.className = 'status-card ' + aiCls;
     document.getElementById('st-agents').textContent=(ag.online||0)+'/'+(ag.total||0);
     document.getElementById('st-assets').textContent=disc.total_assets||0;
+    const wa=d.whatsapp||{};
+    const stWa=document.getElementById('st-whatsapp');
+    if(stWa){
+      const waReady=!!(wa.enabled&&wa.token_set&&wa.phone_number_id&&wa.recipient);
+      let waText='—',waCls='warn';
+      if(!wa.enabled){waText='Inativo';waCls='warn';}
+      else if(wa.token_status==='invalid'){waText='Token inválido';waCls='err';}
+      else if(waReady){waText='Ativo';waCls='ok';}
+      else{waText='Incompleto';waCls='warn';}
+      stWa.textContent=waText;
+      const waCard=stWa.closest('.status-card');
+      if(waCard)waCard.className='status-card '+waCls;
+    }
     document.getElementById('sv-ai').textContent=s.ai?.provider||'—';
     document.getElementById('sd-ai').className='dot '+aiCls;
     document.getElementById('sv-agents').textContent=((ag.total||0)===0)?'0 registrados':((ag.online||0)+' online, '+(ag.offline||0)+' offline');
@@ -2985,6 +3418,10 @@ document.querySelectorAll('.tab-btn').forEach(button=>button.disabled=true);
 document.getElementById('settings-panel').innerHTML='<div class="loading-state" role="status">Carregando configuração real…</div>';
 loadStatus();
 setInterval(loadStatus,30000);
+// Auto-refresh da auditoria de mensagens quando a aba Mensagens está aberta.
+setInterval(()=>{if(_activeSettingsTab==='messages'&&document.getElementById('wa-messages'))loadWhatsAppMessages(true);},30000);
+// Canal QR: enquanto aguarda o pareamento, atualiza status/QR a cada 5s.
+setInterval(()=>{if(_activeSettingsTab==='whatsapp'&&document.getElementById('wa-qr-box')&&_waQr&&_waQr.status==='pairing')loadWhatsAppQr();},5000);
 loadWhatsApp();
 loadAIStatus();
 </script>

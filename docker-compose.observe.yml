@@ -246,8 +246,10 @@ services:
     deploy:
       resources:
         limits:
+          # MEM_LG (não MD): o worker hospeda o Chromium do canal WhatsApp QR
+          # (whatsapp-web.js); com 256M o browser morre por OOM no boot.
           cpus: '${OBSERVE_LIMIT_CPU_MED:-0.5}'
-          memory: ${OBSERVE_LIMIT_MEM_MD:-256M}
+          memory: ${OBSERVE_LIMIT_MEM_LG:-512M}
     depends_on:
       r-observe-postgres:
         condition: service_healthy
@@ -281,6 +283,9 @@ services:
       ICINGA_API_URL: ${ICINGA_API_URL:-https://r-observe-icinga2:5665}
       ICINGA_API_USER: ${ICINGA_API_USER:-icingaweb2}
       ICINGA_API_PASSWORD: ${ICINGA_API_PASSWORD:-}
+      # ── WhatsApp QR (canal alternativo não-oficial, via worker) ─────────────
+      WHATSAPP_QR_ENABLED: ${WHATSAPP_QR_ENABLED:-false}
+      WHATSAPP_QR_AUTH_PATH: ${WHATSAPP_QR_AUTH_PATH:-/var/lib/r-observe/whatsapp-auth}
       # ── Remediação com supervisão por score ───────────────────────────────────
       REMEDIATION_ENABLED: ${REMEDIATION_ENABLED:-true}
       # Score mínimo para execução automática (0.0–1.0). Padrão conservador: 0.85
@@ -302,12 +307,14 @@ services:
       - observe-evidence:/app/data/evidence
       - observe-replays:/app/data/replays
       - observe-logs:/app/logs
+      - observe-whatsapp-auth:/var/lib/r-observe/whatsapp-auth
       - /var/run/docker.sock:/var/run/docker.sock:ro
     tmpfs:
       - /tmp
     networks:
       - observe-internal
       - observe-monitoring
+      - observe-egress
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health | grep -q '\"status\":\"ok\"' || exit 1"]
       interval: 30s
@@ -1092,6 +1099,7 @@ volumes:
   observe-evidence:
   observe-replays:
   observe-logs:
+  observe-whatsapp-auth:
   r-observe-alloy-data:
 
 # ─── NETWORKS ────────────────────────────────────────────────────────────────

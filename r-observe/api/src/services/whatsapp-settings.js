@@ -13,12 +13,12 @@ function maskToken(token) {
 function createWhatsAppSettingsService({ db, log }) {
   async function getRaw() {
     const r = await db.query(
-      'SELECT id, enabled, access_token, phone_number_id, recipient, severity_filter FROM observe_whatsapp_settings WHERE id = 1',
+      'SELECT id, enabled, access_token, phone_number_id, recipient, severity_filter, webhook_verify_token, app_secret FROM observe_whatsapp_settings WHERE id = 1',
     );
     return r.rowCount ? r.rows[0] : null;
   }
 
-  // Nunca expõe o token completo — apenas máscara + flag.
+  // Nunca expõe tokens completos — apenas máscara + flag.
   async function get() {
     const row = await getRaw();
     return {
@@ -28,6 +28,10 @@ function createWhatsAppSettingsService({ db, log }) {
       severity_filter: row?.severity_filter || 'critical',
       token_set: !!row?.access_token,
       token_masked: row?.access_token ? maskToken(row.access_token) : null,
+      webhook_verify_token: row?.webhook_verify_token || '',
+      webhook_verify_token_set: !!row?.webhook_verify_token,
+      app_secret_set: !!row?.app_secret,
+      webhook_path: '/observe/api/whatsapp/webhook',
     };
   }
 
@@ -47,23 +51,29 @@ function createWhatsAppSettingsService({ db, log }) {
       recipient: patch.recipient !== undefined ? normalizeRecipient(patch.recipient) || '' : current?.recipient || '',
       severity_filter: patch.severity_filter || current?.severity_filter || 'critical',
       access_token: resolveToken(patch.access_token, current?.access_token || null),
+      webhook_verify_token: patch.webhook_verify_token !== undefined
+        ? String(patch.webhook_verify_token || '').trim()
+        : current?.webhook_verify_token || '',
+      app_secret: resolveToken(patch.app_secret, current?.app_secret || null),
     };
 
     await db.query(
       `INSERT INTO observe_whatsapp_settings
-         (id, enabled, access_token, phone_number_id, recipient, severity_filter, updated_at)
-       VALUES (1, $1, $2, $3, $4, $5, NOW())
+         (id, enabled, access_token, phone_number_id, recipient, severity_filter, webhook_verify_token, app_secret, updated_at)
+       VALUES (1, $1, $2, $3, $4, $5, $6, $7, NOW())
        ON CONFLICT (id) DO UPDATE SET
          enabled = EXCLUDED.enabled,
          access_token = EXCLUDED.access_token,
          phone_number_id = EXCLUDED.phone_number_id,
          recipient = EXCLUDED.recipient,
          severity_filter = EXCLUDED.severity_filter,
+         webhook_verify_token = EXCLUDED.webhook_verify_token,
+         app_secret = EXCLUDED.app_secret,
          updated_at = NOW()`,
-      [next.enabled, next.access_token, next.phone_number_id, next.recipient, next.severity_filter],
+      [next.enabled, next.access_token, next.phone_number_id, next.recipient, next.severity_filter, next.webhook_verify_token, next.app_secret],
     );
 
-    log('info', 'WhatsApp settings updated', { enabled: next.enabled, recipient_set: !!next.recipient });
+    log('info', 'WhatsApp settings updated', { enabled: next.enabled, recipient_set: !!next.recipient, webhook_set: !!next.webhook_verify_token });
     return get();
   }
 

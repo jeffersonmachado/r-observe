@@ -1,6 +1,7 @@
 'use strict';
 
 const { sendWhatsAppMessage } = require('../shared/whatsapp');
+const { createWhatsAppMessageLog } = require('../shared/whatsapp-message-log');
 
 function severityEnabled(filter, severity) {
   if (filter === 'all') return true;
@@ -8,7 +9,9 @@ function severityEnabled(filter, severity) {
   return severity === 'critical';
 }
 
-function createWhatsAppNotifier({ db, log }) {
+function createWhatsAppNotifier({ db, log, qr = null }) {
+  const msgLog = createWhatsAppMessageLog({ db, log });
+
   async function getConfig() {
     try {
       const r = await db.query(
@@ -31,13 +34,39 @@ function createWhatsAppNotifier({ db, log }) {
       const causeLine = incident.cause ? `\nCausa: ${incident.cause}` : '';
       const text = `${icon} *R-Observe*\n${incident.title}\nSeveridade: ${incident.severity}${causeLine}`;
 
-      await sendWhatsAppMessage({
-        accessToken: cfg.access_token,
-        phoneNumberId: cfg.phone_number_id,
-        to: cfg.recipient,
-        text,
-      });
-      log('info', 'WhatsApp notification sent', { incident_id: incident.id, severity: incident.severity });
+      // Canal: Cloud API quando configurada; senão, fallback para o canal QR
+      // (bridge no worker) se a sessão estiver pronta. O destinatário do QR é
+      // o mesmo `recipient` das settings (normalizado para @c.us pelo bridge).
+      const cloudConfigured = !!(cfg.access_token && cfg.phone_number_id && cfg.recipient);
+      const useQr = !cloudConfigured && !!qr && qr.qrReady();
+
+      if (useQr) {
+        try {
+          if (!cfg.recipient) throw new Error('Destinatário (recipient) não configurado');
+          const res = await qr.sendText(cfg.recipient, text);
+          if (!res || res.ok !== true) throw new Error((res && (res.message || res.error)) || 'qr_send_failed');
+          await msgLog.record({ direction: 'out', kind: 'incident_notification', channel: 'qr', phone: cfg.recipient, body: text, status: 'sent', metaMessageId: res.externalMessageId || null, incidentId: incident.id || null });
+          log('info', 'WhatsApp notification sent (QR)', { incident_id: incident.id, severity: incident.severity });
+        } catch (sendErr) {
+          await msgLog.record({ direction: 'out', kind: 'incident_notification', channel: 'qr', phone: cfg.recipient || null, body: text, status: 'failed', error: sendErr.message, incidentId: incident.id || null });
+          log('warn', 'WhatsApp QR notification failed', { incident_id: incident.id, err: sendErr.message });
+        }
+        return;
+      }
+
+      try {
+        const sent = await sendWhatsAppMessage({
+          accessToken: cfg.access_token,
+          phoneNumberId: cfg.phone_number_id,
+          to: cfg.recipient,
+          text,
+        });
+        await msgLog.record({ direction: 'out', kind: 'incident_notification', phone: cfg.recipient, body: text, status: 'sent', metaMessageId: sent.message_id, incidentId: incident.id || null });
+        log('info', 'WhatsApp notification sent', { incident_id: incident.id, severity: incident.severity });
+      } catch (sendErr) {
+        await msgLog.record({ direction: 'out', kind: 'incident_notification', phone: cfg.recipient, body: text, status: 'failed', error: sendErr.message, incidentId: incident.id || null });
+        throw sendErr;
+      }
     } catch (e) {
       log('warn', 'WhatsApp notification failed', { incident_id: incident.id, err: e.message });
     }

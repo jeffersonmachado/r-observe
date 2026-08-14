@@ -7,6 +7,7 @@ const icinga      = require('./icinga');
 const { createDbClient } = require('./db');
 const { createEventProcessor } = require('./services/event-processor');
 const { createWhatsAppNotifier } = require('./services/whatsapp-notify');
+const { createWhatsAppQrService } = require('./services/whatsapp-qr');
 const { createLifecycle } = require('../shared/lifecycle');
 const { runWithTenant } = require('../shared/tenant-context');
 
@@ -38,7 +39,10 @@ const redis = new Redis(process.env.REDIS_URL, {
 redis.on('error', (e) => log('error', 'Redis error', { err: e.message }));
 
 // ─── Event processor (extraído para services/event-processor.js) ────────────
-const whatsapp = createWhatsAppNotifier({ db, log });
+// Canal WhatsApp QR (alternativo à Cloud API): controlado pela tabela
+// observe_whatsapp_qr_connections (API escreve, worker faz poll e executa).
+const whatsappQr = createWhatsAppQrService({ db, log });
+const whatsapp = createWhatsAppNotifier({ db, log, qr: whatsappQr });
 
 const processorState = { count: 0 };
 const {
@@ -105,6 +109,7 @@ async function pollQueues() {
 async function startWorker() {
   await redis.connect();
   await loadCatalogFromDb();
+  whatsappQr.start();
   log('info', 'Worker started, polling queues', { queues: QUEUE_KEYS });
   running = true;
 
@@ -171,6 +176,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 const lifecycle = createLifecycle({ label: 'r-observe-worker', log });
 lifecycle.onServer(server);
 lifecycle.addCloser('worker-loop', () => { running = false; return Promise.resolve(); });
+lifecycle.addCloser('whatsapp-qr', () => whatsappQr.stop());
 lifecycle.addCloser('db', () => db.end());
 lifecycle.addCloser('redis', () => redis.quit());
 lifecycle.start();

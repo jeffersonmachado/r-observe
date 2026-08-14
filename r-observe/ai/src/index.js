@@ -300,6 +300,70 @@ async function callAnthropic(prompt) {
   return data.content?.[0]?.text || '';
 }
 
+// ─── Chat genérico (assistente operacional / RAG) ───────────────────────────
+const CHAT_SYSTEM_PROMPT =
+  'Você é o assistente operacional do R-Observe. Responda de forma curta, objetiva e em português brasileiro. ' +
+  'Baseie suas respostas exclusivamente no contexto fornecido. Se a informação não estiver disponível, diga que não sabe.';
+
+async function completeChat(messages, { maxTokens = 500, temperature = 0.3 } = {}) {
+  const provider = runtimeConfig.provider;
+  const model = resolveModel(provider, runtimeConfig.model);
+
+  if (provider === 'mock') {
+    return { content: 'Assistente indisponível: nenhum provider de IA configurado.', provider, model };
+  }
+  if (!runtimeConfig.apiKey) {
+    return { content: 'Assistente indisponível: chave de API do provider não configurada.', provider, model };
+  }
+
+  const system = { role: 'system', content: CHAT_SYSTEM_PROMPT };
+  const fullMessages = [system, ...(messages || [])].filter((m) => m && m.content);
+  const apiKey = runtimeConfig.apiKey;
+  let content = '';
+
+  if (provider === 'openai') {
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages: fullMessages, max_tokens: maxTokens, temperature }),
+      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+    });
+    if (!resp.ok) { const t = await resp.text(); throw new Error(`OpenAI API error ${resp.status}: ${t.slice(0, 200)}`); }
+    const data = await resp.json();
+    content = data.choices?.[0]?.message?.content || '';
+  } else if (provider === 'deepseek') {
+    const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages: fullMessages, max_tokens: maxTokens, temperature }),
+      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(`DeepSeek API error: ${data.error?.message || data.error || resp.status}`);
+    const msg = data.choices?.[0]?.message || {};
+    content = msg.content || msg.reasoning_content || '';
+  } else if (provider === 'anthropic') {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        system: CHAT_SYSTEM_PROMPT,
+        messages: (messages || []).map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
+      }),
+      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+    });
+    if (!resp.ok) { const t = await resp.text(); throw new Error(`Anthropic API error ${resp.status}: ${t.slice(0, 200)}`); }
+    const data = await resp.json();
+    content = data.content?.[0]?.text || '';
+  } else {
+    return { content: 'Provider de IA não suportado para chat.', provider, model };
+  }
+
+  return { content: (content || '').trim() || '(sem resposta)', provider, model };
+}
+
 function mockAnalyze(incident, context) {
   const hasHistory = (context?.recent_incidents?.length ?? 0) > 0;
   const hasOutput  = !!context?.event_output;
@@ -548,6 +612,21 @@ app.post('/ai/explain', requireAuth, limiter, async (req, res) => {
     log('error', 'AI analysis failed', { err: e.message });
     if (e.name === 'AbortError') return res.status(504).json({ error: 'AI provider timeout' });
     res.status(502).json({ error: 'AI analysis failed', detail: e.message });
+  }
+});
+
+// POST /ai/chat — chat genérico (assistente operacional / RAG)
+app.post('/ai/chat', requireAuth, limiter, async (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: 'messages deve ser um array não vazio' });
+  }
+  try {
+    const result = await completeChat(messages, { maxTokens: Number(req.body?.max_tokens) || 500 });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    if (e.name === 'AbortError') return res.status(504).json({ error: 'AI provider timeout' });
+    res.status(502).json({ error: e.message });
   }
 });
 
