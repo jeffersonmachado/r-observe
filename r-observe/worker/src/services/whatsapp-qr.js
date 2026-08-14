@@ -59,6 +59,19 @@ function createWhatsAppQrService({
   // Log persistente de eventos de conexão (nunca lança; falha só gera warn).
   const connLog = createWhatsAppConnectionLog({ db, log });
 
+  // Dedupe em memória do log de conexões: o WA Web renova o QR a cada ~20-30s
+  // durante o pareamento e cada renovação dispara status 'pairing' + evento
+  // 'qr' — sem dedupe, o log vira ruído mesmo sem ninguém escanear. Regras:
+  //   - status_changed: só grava quando o status muda de fato;
+  //   - qr_generated: no máximo 1 a cada QR_LOG_DEDUPE_MS, exceto se um
+  //     status_changed foi gravado desde o último QR (novo ciclo real de
+  //     pareamento: scan → connected/ready/disconnected/error sempre registram).
+  // O estado é só em memória: após restart do worker, o primeiro evento grava.
+  const QR_LOG_DEDUPE_MS = 5 * 60 * 1000;
+  let lastRecordedStatus = null;
+  let lastQrRecordedAt = 0;
+  let statusRecordedSinceQr = false;
+
   async function persist(patch) {
     const sets = [];
     const params = [];
@@ -109,7 +122,12 @@ function createWhatsAppQrService({
     bridge.on('qr', ({ qrText, qrDataUrl, expiresAt }) => {
       persist({ status: 'pairing', qr_text: qrText, qr_data_url: qrDataUrl, qr_expires_at: expiresAt || null, last_error: null });
       // Nunca gravar o texto/dataUrl do QR no log — só metadados.
-      connLog.record({ channel: 'qr', event: 'qr_generated', detail: expiresAt ? `expires_at=${expiresAt}` : null });
+      const now = Date.now();
+      if (statusRecordedSinceQr || now - lastQrRecordedAt >= QR_LOG_DEDUPE_MS) {
+        connLog.record({ channel: 'qr', event: 'qr_generated', detail: expiresAt ? `expires_at=${expiresAt}` : null });
+        lastQrRecordedAt = now;
+        statusRecordedSinceQr = false;
+      }
     });
     bridge.on('status', ({ status, reason }) => {
       // QR some da tela quando a sessão conecta de vez.
@@ -120,7 +138,11 @@ function createWhatsAppQrService({
         patch.qr_expires_at = null;
       }
       persist(patch);
-      connLog.record({ channel: 'qr', event: 'status_changed', detail: `status=${status}${reason ? ` reason=${reason}` : ''}` });
+      if (status !== lastRecordedStatus) {
+        lastRecordedStatus = status;
+        statusRecordedSinceQr = true;
+        connLog.record({ channel: 'qr', event: 'status_changed', detail: `status=${status}${reason ? ` reason=${reason}` : ''}` });
+      }
     });
     bridge.on('ready', () => {
       connLog.record({ channel: 'qr', event: 'ready' });

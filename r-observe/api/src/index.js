@@ -1364,7 +1364,7 @@ app.post(`${BASE}/system/whatsapp/qr/disconnect`, requireAuth, requireAdmin, req
 
 // Log persistente de eventos de conexão (ambos os canais): ciclo de vida do
 // QR, comandos aplicados pelo worker e resultados de envio. Filtros
-// whitelistados (channel/event) no helper.
+// whitelistados (channel/event) e busca textual (q, ILIKE no detail) no helper.
 app.get(`${BASE}/system/whatsapp/connections/log`, requireAuth, requireAdmin, async (req, res) => {
   try {
     const events = await whatsappConnLog.listRecent(req.query || {});
@@ -2726,6 +2726,7 @@ const SETTINGS_HTML = /* html */`<!DOCTYPE html>
     <button id="settings-tab-monitoring" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="monitoring" onclick="switchTab('monitoring')">📊 Monitoramento</button>
     <button id="settings-tab-whatsapp" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="whatsapp" onclick="switchTab('whatsapp')">💬 WhatsApp</button>
     <button id="settings-tab-messages" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="messages" onclick="switchTab('messages')">📨 Mensagens</button>
+    <button id="settings-tab-connections" class="tab-btn" role="tab" aria-selected="false" aria-controls="settings-panel" tabindex="-1" data-tab="connections" onclick="switchTab('connections')">🔗 Conexões</button>
   </div>
 
   <div class="settings-layout">
@@ -2876,8 +2877,8 @@ function switchTab(tab){
     document.getElementById('dirty-status').textContent='Nenhuma alteração pendente.';
   }
   _activeSettingsTab=tab;
-  document.getElementById('save-section-btn').hidden=tab==='ai'||tab==='whatsapp'||tab==='messages';
-  document.getElementById('dirty-status').hidden=tab==='ai'||tab==='whatsapp'||tab==='messages';
+  document.getElementById('save-section-btn').hidden=tab==='ai'||tab==='whatsapp'||tab==='messages'||tab==='connections';
+  document.getElementById('dirty-status').hidden=tab==='ai'||tab==='whatsapp'||tab==='messages'||tab==='connections';
   document.querySelectorAll('.tab-btn').forEach(b=>{
     const active=b.dataset.tab===tab;
     b.classList.toggle('active',active);
@@ -2885,8 +2886,8 @@ function switchTab(tab){
     b.tabIndex=active?0:-1;
   });
   document.getElementById('settings-panel').setAttribute('aria-labelledby','settings-tab-'+tab);
-  // Aba Mensagens usa a largura toda (tabela de auditoria); demais mantêm o aside.
-  document.querySelector('.settings-layout').classList.toggle('messages-full',tab==='messages');
+  // Abas Mensagens e Conexões usam a largura toda (tabelas de auditoria); demais mantêm o aside.
+  document.querySelector('.settings-layout').classList.toggle('messages-full',tab==='messages'||tab==='connections');
   const p=document.getElementById('settings-panel');
   if(tab==='discovery') renderDiscovery(p);
   else if(tab==='ai') renderAI(p);
@@ -2896,6 +2897,7 @@ function switchTab(tab){
   else if(tab==='monitoring') renderMonitoring(p);
   else if(tab==='whatsapp') renderWhatsApp(p);
   else if(tab==='messages') renderMessages(p);
+  else if(tab==='connections') renderConnections(p);
 }
 
 document.querySelector('.tabs[role="tablist"]').addEventListener('keydown',event=>{
@@ -3093,22 +3095,10 @@ function renderWhatsApp(el){
   ]));
   // ── Canal QR (alternativo, não-oficial) ──
   el.appendChild(h('div',{className:'panel-title',style:'margin-top:1.5rem'},'Canal QR (alternativo, não-oficial)'));
-  el.appendChild(h('div',{className:'hint'},'Conecta um número WhatsApp lendo um QR Code (whatsapp-web.js). Serve como fallback: se a Cloud API acima não estiver configurada, os alertas saem por este canal. O pareamento roda no worker.'));
+  el.appendChild(h('div',{className:'hint'},'Conecta um número WhatsApp lendo um QR Code (whatsapp-web.js). Serve como fallback: se a Cloud API acima não estiver configurada, os alertas saem por este canal. O pareamento roda no worker. O log de eventos dos canais está na aba Conexões.'));
   el.appendChild(h('div',{id:'wa-qr-box'}));
-  // ── Log de conexões (eventos persistentes dos canais QR/Cloud) ──
-  el.appendChild(h('div',{className:'panel-title',style:'margin-top:1.5rem'},'Log de conexões'));
-  el.appendChild(h('div',{className:'field',style:'display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'},[
-    h('select',{id:'wa-conn-channel',onchange:'loadWaConnLog()',style:'padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;width:auto'},[
-      h('option',{value:''},'Todos os canais'),
-      h('option',{value:'qr'},'QR'),
-      h('option',{value:'cloud'},'Cloud')
-    ]),
-    h('button',{className:'btn btn-secondary',type:'button',title:'Atualizar log',onclick:'loadWaConnLog()'},'↺')
-  ]));
-  el.appendChild(h('div',{id:'wa-conn-log',style:'overflow-x:auto'},'Carregando…'));
   renderWhatsAppQr();
   loadWhatsAppQr();
-  loadWaConnLog();
   document.getElementById('tog-wa_enabled').checked=!!w.enabled;
   document.getElementById('wa-severity').value=w.severity_filter||'critical';
 }
@@ -3167,39 +3157,94 @@ function toggleWhatsAppQr(){
   const tog=document.getElementById('tog-wa_qr_enabled');
   if(tog&&tog.checked)connectWhatsAppQr();else disconnectWhatsAppQr(true);
 }
-// ── Log de conexões (auditoria de eventos dos canais QR/Cloud) ──
+// ── Aba Conexões: log de auditoria dos canais WhatsApp QR/Cloud ──
+// Infinite scroll lazy: 50 por página; um sentinel observado por
+// IntersectionObserver dispara a próxima página ao aproximar do fim.
+// Sem auto-refresh: o botão ↺ reseta e recarrega do topo (não briga com o scroll).
 const WA_CONN_EVENT_LABELS={service_started:'Serviço iniciado',command_applied:'Comando aplicado',connect_requested:'Conexão solicitada',disconnect_requested:'Desconexão solicitada',qr_generated:'QR gerado',status_changed:'Mudança de status',ready:'Pronto (sessão ativa)',error:'Erro',lock_cleared:'Lock do Chrome removido',send_qr_ok:'Envio via QR ok',send_qr_fail:'Envio via QR falhou',send_cloud_ok:'Envio via Cloud ok',send_cloud_fail:'Envio via Cloud falhou'};
-function loadWaConnLog(){
-  const box=document.getElementById('wa-conn-log');
-  if(!box)return;
-  const p=new URLSearchParams({limit:'50',offset:'0'});
-  const ch=document.getElementById('wa-conn-channel');
-  if(ch&&ch.value)p.set('channel',ch.value);
-  fetch(API+'/system/whatsapp/connections/log?'+p.toString(),{headers:getHeaders()}).then(r=>r.json()).then(d=>{
-    renderWaConnLog(box,(d&&d.events)||[]);
-  }).catch(()=>{
-    box.innerHTML='';box.appendChild(h('div',{className:'hint'},'Falha ao carregar o log de conexões.'));
-  });
+let _waConnRows=[];let _waConnOffset=0;let _waConnTotal=0;let _waConnLoading=false;let _waConnSearchTimer=null;let _waConnObserver=null;
+function renderConnections(el){
+  el.innerHTML='';
+  const waInputStyle='padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px';
+  el.appendChild(h('div',{className:'panel-title'},'Log de conexões (canais WhatsApp QR/Cloud)'));
+  const eventSel=h('select',{id:'wa-conn-event',onchange:'loadWaConnLog(true)',style:waInputStyle+';width:auto'},[h('option',{value:''},'Todos os eventos')]);
+  Object.keys(WA_CONN_EVENT_LABELS).forEach(k=>eventSel.appendChild(h('option',{value:k},WA_CONN_EVENT_LABELS[k])));
+  el.appendChild(h('div',{className:'field',style:'display:flex;gap:.5rem;flex-wrap:wrap;align-items:center'},[
+    h('select',{id:'wa-conn-channel',onchange:'loadWaConnLog(true)',style:waInputStyle+';width:auto'},[
+      h('option',{value:''},'Todos os canais'),
+      h('option',{value:'qr'},'QR'),
+      h('option',{value:'cloud'},'Cloud')
+    ]),
+    eventSel,
+    h('input',{type:'search',id:'wa-conn-q',placeholder:'Buscar no detalhe…',oninput:'waConnSearch()',style:waInputStyle+';flex:1;min-width:180px'}),
+    h('button',{className:'btn btn-secondary',type:'button',title:'Recarregar do topo',onclick:'loadWaConnLog(true)'},'↺')
+  ]));
+  el.appendChild(h('div',{id:'wa-conn-log',style:'overflow-x:auto'},'Carregando…'));
+  el.appendChild(h('div',{id:'wa-conn-sentinel',style:'height:1px'}));
+  el.appendChild(h('div',{id:'wa-conn-more',className:'hint',style:'margin-top:.5rem;text-align:center'}));
+  loadWaConnLog(true);
+  if(_waConnObserver)_waConnObserver.disconnect();
+  _waConnObserver=new IntersectionObserver(()=>waConnMaybeLoadMore(),{rootMargin:'400px'});
+  _waConnObserver.observe(document.getElementById('wa-conn-sentinel'));
 }
-function renderWaConnLog(box,events){
+function waConnSearch(){clearTimeout(_waConnSearchTimer);_waConnSearchTimer=setTimeout(()=>loadWaConnLog(true),400);}
+function waConnMaybeLoadMore(){
+  const s=document.getElementById('wa-conn-sentinel');
+  if(!s||_waConnLoading)return;
+  if(!_waConnRows.length||(_waConnTotal&&_waConnOffset>=_waConnTotal))return;
+  if(s.getBoundingClientRect().top<window.innerHeight+400)loadWaConnLog(false);
+}
+function loadWaConnLog(reset=true){
+  const box=document.getElementById('wa-conn-log');
+  if(!box||_waConnLoading)return;
+  if(reset){_waConnRows=[];_waConnOffset=0;_waConnTotal=0;}
+  else if(_waConnTotal&&_waConnOffset>=_waConnTotal)return;
+  _waConnLoading=true;
+  const p=new URLSearchParams({limit:'50',offset:String(_waConnOffset)});
+  const ch=document.getElementById('wa-conn-channel');
+  const ev=document.getElementById('wa-conn-event');
+  const q=document.getElementById('wa-conn-q');
+  if(ch&&ch.value)p.set('channel',ch.value);
+  if(ev&&ev.value)p.set('event',ev.value);
+  if(q&&q.value.trim())p.set('q',q.value.trim());
+  fetch(API+'/system/whatsapp/connections/log?'+p.toString(),{headers:getHeaders()}).then(r=>r.json()).then(d=>{
+    const rows=(d&&d.events)||[];
+    _waConnRows=_waConnRows.concat(rows);
+    _waConnOffset+=rows.length;
+    if(rows.length)_waConnTotal=Number(rows[0].total||0);else if(reset)_waConnTotal=0;
+    renderWaConnLog(box);
+  }).catch(()=>{
+    if(_waConnRows.length)return;
+    box.innerHTML='';box.appendChild(h('div',{className:'hint'},'Falha ao carregar o log de conexões.'));
+  }).finally(()=>{_waConnLoading=false;waConnMaybeLoadMore();});
+}
+function renderWaConnLog(box){
   box.innerHTML='';
-  if(!events.length){box.appendChild(h('div',{className:'hint'},'Nenhum evento de conexão registrado.'));return;}
-  const cellStyle='padding:.35rem .5rem;border-bottom:1px solid var(--border);vertical-align:top;word-break:break-word';
-  const table=h('table',{style:'width:100%;border-collapse:collapse;font-size:.85rem;table-layout:fixed'});
-  const head=h('tr',{style:'text-align:left;color:var(--muted)'});
-  [['Quando','25%'],['Canal','15%'],['Evento','26%'],['Detalhe','34%']].forEach(([t,w])=>head.appendChild(h('th',{style:'padding:.35rem .5rem;border-bottom:1px solid var(--border);width:'+w},t)));
-  table.appendChild(head);
-  events.forEach(ev=>{
-    const tr=h('tr',{});
-    const dt=ev.created_at?new Date(ev.created_at).toLocaleString('pt-BR'):'—';
-    const isFail=ev.event==='error'||/_fail$/.test(ev.event);
-    tr.appendChild(h('td',{style:cellStyle},dt));
-    tr.appendChild(h('td',{style:cellStyle},ev.channel==='qr'?'QR':'Cloud'));
-    tr.appendChild(h('td',{style:cellStyle+';color:'+(isFail?'var(--err)':'var(--text)')},WA_CONN_EVENT_LABELS[ev.event]||ev.event));
-    tr.appendChild(h('td',{style:cellStyle,title:ev.detail||''},ev.detail||'—'));
-    table.appendChild(tr);
-  });
-  box.appendChild(table);
+  if(!_waConnRows.length){box.appendChild(h('div',{className:'hint'},'Nenhum evento de conexão registrado.'));}
+  else{
+    const cellStyle='padding:.35rem .5rem;border-bottom:1px solid var(--border);vertical-align:top;word-break:break-word';
+    const badgeStyle='display:inline-block;padding:.1rem .4rem;border:1px solid var(--border);border-radius:4px;font-size:.75rem';
+    const table=h('table',{style:'width:100%;border-collapse:collapse;font-size:.85rem;table-layout:fixed'});
+    const head=h('tr',{style:'text-align:left;color:var(--muted)'});
+    [['Quando','22%'],['Canal','12%'],['Evento','28%'],['Detalhe','38%']].forEach(([t,w])=>head.appendChild(h('th',{style:'padding:.35rem .5rem;border-bottom:1px solid var(--border);width:'+w},t)));
+    table.appendChild(head);
+    _waConnRows.forEach(ev=>{
+      const tr=h('tr',{});
+      const dt=ev.created_at?new Date(ev.created_at).toLocaleString('pt-BR'):'—';
+      const isFail=ev.event==='error'||/_fail$/.test(ev.event);
+      tr.appendChild(h('td',{style:cellStyle},dt));
+      tr.appendChild(h('td',{style:cellStyle},[h('span',{style:badgeStyle},ev.channel==='qr'?'QR':'Cloud')]));
+      tr.appendChild(h('td',{style:cellStyle+';color:'+(isFail?'var(--err)':'var(--text)')},WA_CONN_EVENT_LABELS[ev.event]||ev.event));
+      tr.appendChild(h('td',{style:cellStyle,title:ev.detail||''},ev.detail||'—'));
+      table.appendChild(tr);
+    });
+    box.appendChild(table);
+  }
+  const more=document.getElementById('wa-conn-more');
+  if(more){
+    const hasMore=_waConnRows.length&&_waConnOffset<_waConnTotal;
+    more.textContent=_waConnRows.length?(hasMore?('Mostrando '+_waConnOffset+' de '+_waConnTotal+' — role para carregar mais'):('Fim da lista ('+_waConnTotal+')')):'';
+  }
 }
 // ── Mensagens (auditoria WhatsApp) ──
 function renderMessages(el){
@@ -3490,7 +3535,6 @@ setInterval(loadStatus,30000);
 setInterval(()=>{if(_activeSettingsTab==='messages'&&document.getElementById('wa-messages'))loadWhatsAppMessages(true);},30000);
 // Canal QR: enquanto aguarda o pareamento, atualiza status/QR a cada 5s.
 setInterval(()=>{if(_activeSettingsTab==='whatsapp'&&document.getElementById('wa-qr-box')&&_waQr&&_waQr.status==='pairing')loadWhatsAppQr();},5000);
-setInterval(()=>{if(_activeSettingsTab==='whatsapp'&&document.getElementById('wa-conn-log'))loadWaConnLog();},5000);
 loadWhatsApp();
 loadAIStatus();
 </script>

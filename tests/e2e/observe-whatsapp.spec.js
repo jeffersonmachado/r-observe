@@ -93,10 +93,15 @@ test.describe('R-Observe · integração WhatsApp', () => {
     expect(typeof body.status).toBe('string');
   });
 
-  test('seção Log de conexões é exibida na aba WhatsApp e o endpoint responde', async ({ page }) => {
-    await openWhatsAppTab(page);
+  test('aba Conexões exibe o log de conexões com filtros e o endpoint responde', async ({ page }) => {
+    const tab = page.getByRole('tab', { name: /Conexões/ });
+    await expect(tab).toBeEnabled();
+    await tab.click();
+    await expect(tab).toHaveAttribute('aria-selected', 'true');
 
     await expect(page.locator('#wa-conn-channel')).toBeVisible();
+    await expect(page.locator('#wa-conn-event')).toBeVisible();
+    await expect(page.locator('#wa-conn-q')).toBeVisible();
     const box = page.locator('#wa-conn-log');
     await expect(box).toBeVisible();
     // Com eventos: tabela com as colunas do log. Sem eventos: hint informativo.
@@ -110,10 +115,19 @@ test.describe('R-Observe · integração WhatsApp', () => {
       await expect(box).toContainText(/Nenhum evento|Falha ao carregar/);
     }
 
+    // A seção de log saiu da aba WhatsApp: lá só resta o Canal QR.
+    await page.getByRole('tab', { name: /WhatsApp/ }).click();
+    await expect(page.locator('#wa-qr-box')).toBeVisible();
+    await expect(page.locator('#wa-conn-log')).toHaveCount(0);
+
     const resp = await page.request.get('/observe/api/system/whatsapp/connections/log?limit=50');
     expect(resp.status()).toBe(200);
     const body = await resp.json();
     expect(Array.isArray(body.events)).toBe(true);
+
+    await page.getByRole('tab', { name: /Conexões/ }).click();
+    await expect(page.locator('#wa-conn-log')).toBeVisible();
+    await page.screenshot({ path: '/tmp/wa-connections-tab.png', fullPage: true });
   });
 
   test('modal de teste abre e cancela sem enviar', async ({ page }) => {    await openWhatsAppTab(page);

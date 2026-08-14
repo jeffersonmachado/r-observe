@@ -79,6 +79,27 @@ describe('WhatsApp connection events log', () => {
     assert.doesNotMatch(db.calls[0].sql, /WHERE/);
   });
 
+  it('busca textual (q) filtra por detail com ILIKE', async () => {
+    const db = makeDb();
+    const audit = createWhatsAppConnectionLog({ db, log });
+    await audit.listRecent({ q: 'timeout' });
+    const { sql, params } = db.calls[0];
+    assert.match(sql, /detail ILIKE \$1/);
+    assert.deepEqual(params, ['%timeout%', 50, 0]);
+  });
+
+  it('q combina com canal/evento e é truncado em 100 chars', async () => {
+    const db = makeDb();
+    const audit = createWhatsAppConnectionLog({ db, log });
+    await audit.listRecent({ channel: 'qr', event: 'error', q: ` ${'x'.repeat(150)} ` });
+    const { sql, params } = db.calls[0];
+    assert.match(sql, /channel = \$1 AND event = \$2 AND detail ILIKE \$3/);
+    assert.equal(params[2].length, 102); // % + 100 + %
+    // q vazio/só espaços é ignorado
+    await audit.listRecent({ q: '   ' });
+    assert.doesNotMatch(db.calls[1].sql, /ILIKE/);
+  });
+
   it('todos os eventos instrumentados estão na whitelist', () => {
     for (const ev of ['service_started', 'command_applied', 'connect_requested', 'disconnect_requested',
       'qr_generated', 'status_changed', 'ready', 'error', 'lock_cleared',

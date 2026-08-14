@@ -50,7 +50,7 @@ function createWhatsAppConnectionLog({ db, log }) {
     }
   }
 
-  async function listRecent({ limit = 50, offset = 0, channel, event } = {}) {
+  async function listRecent({ limit = 50, offset = 0, channel, event, q } = {}) {
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
     const where = [];
@@ -62,6 +62,10 @@ function createWhatsAppConnectionLog({ db, log }) {
     if (event && KNOWN_EVENTS.includes(event)) {
       params.push(event);
       where.push(`event = $${params.length}`);
+    }
+    if (q && String(q).trim()) {
+      params.push(`%${String(q).trim().slice(0, 100)}%`);
+      where.push(`detail ILIKE $${params.length}`);
     }
     params.push(safeLimit);
     const limitIdx = params.length;
