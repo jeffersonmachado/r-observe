@@ -28,16 +28,34 @@ const DEFAULT_POLL_MS = 5000;
  * do node_modules do worker, que tem a dependência real. Lazy: só carrega
  * (puppeteer etc.) quando uma conexão é efetivamente criada.
  */
-function workerClientFactory({ clientId, dataPath, puppeteer }) {
+function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVersionCacheDir }) {
   // eslint-disable-next-line global-require
   const { Client, LocalAuth } = require('whatsapp-web.js');
+  // eslint-disable-next-line global-require
+  const { resolveWebVersionOptions } = require('@results/whatsapp-qr-bridge');
   return new Client({
     authStrategy: new LocalAuth({ clientId, dataPath }),
     puppeteer: puppeteer || {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     },
+    ...resolveWebVersionOptions({ webVersion, webVersionCacheDir }),
   });
+}
+
+/**
+ * Mapeia a env WHATSAPP_QR_WEB_VERSION para a opção webVersion do bridge:
+ *   - não definida      → undefined (pin default do pacote, workaround do bug
+ *                         wwebjs#127084 que trava o `ready` nos builds
+ *                         2.3000.1041xxx+ do WA Web);
+ *   - 'latest'          → null (sem pin; WA Web mais recente);
+ *   - qualquer outra    → pin custom (exige <versao>.html no cache local).
+ */
+function envWebVersion(env) {
+  const raw = env.WHATSAPP_QR_WEB_VERSION;
+  if (raw == null || String(raw).trim() === '') return undefined;
+  if (String(raw).trim().toLowerCase() === 'latest') return null;
+  return String(raw).trim();
 }
 
 function createWhatsAppQrService({
@@ -97,6 +115,7 @@ function createWhatsAppQrService({
     bridge = create({
       authDataPath,
       clientFactory: clientFactory || workerClientFactory,
+      webVersion: envWebVersion(env),
       // Chrome em container com CPU limitada: o init do whatsapp-web.js estoura
       // o protocolTimeout default (180s) do puppeteer.
       puppeteer: {
