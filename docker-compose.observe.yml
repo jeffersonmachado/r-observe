@@ -246,10 +246,11 @@ services:
     deploy:
       resources:
         limits:
-          # MEM_LG (não MD): o worker hospeda o Chromium do canal WhatsApp QR
-          # (whatsapp-web.js); com 256M o browser morre por OOM no boot.
+          # MEM_XL: o worker hospeda o Chromium do canal WhatsApp QR
+          # (whatsapp-web.js); o init do WA Web estoura até 512M (OOM kill
+          # confirmado em prod) e picos de init passam de 256M com folga.
           cpus: '${OBSERVE_LIMIT_CPU_MED:-0.5}'
-          memory: ${OBSERVE_LIMIT_MEM_LG:-512M}
+          memory: ${OBSERVE_LIMIT_MEM_XL:-1G}
     depends_on:
       r-observe-postgres:
         condition: service_healthy

@@ -65,11 +65,13 @@ main() {
   cpu_max="$(round_cpu "$(clamp "$(awk -v s="$scale_cpu" 'BEGIN { printf "%.3f", 1.0 * s }')" 0.5 3.0)")"
 
   # Memória: base * scale, com pisos por tier.
-  local mem_xs mem_sm mem_md mem_lg
+  local mem_xs mem_sm mem_md mem_lg mem_xl
   mem_xs="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 64 * s }')" 32 8192)")"
   mem_sm="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 128 * s }')" 64 8192)")"
   mem_md="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 256 * s }')" 128 8192)")"
   mem_lg="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 512 * s }')" 256 8192)")"
+  # XL: worker com Chromium do canal WhatsApp QR (init do WA Web estoura 512M).
+  mem_xl="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 1024 * s }')" 512 8192)")"
 
   local lines
   lines="$(cat <<EOF
@@ -82,6 +84,7 @@ OBSERVE_LIMIT_MEM_XS=${mem_xs}
 OBSERVE_LIMIT_MEM_SM=${mem_sm}
 OBSERVE_LIMIT_MEM_MD=${mem_md}
 OBSERVE_LIMIT_MEM_LG=${mem_lg}
+OBSERVE_LIMIT_MEM_XL=${mem_xl}
 EOF
 )"
 
