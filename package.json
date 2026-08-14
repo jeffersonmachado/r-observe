@@ -43,6 +43,7 @@
     "observe:token:verify": "bash ./scripts/observe/token.sh verify",
     "observe:token:rotate": "bash ./scripts/observe/token.sh rotate",
     "observe:token:recover": "bash ./scripts/observe/token.sh show",
+    "mcp:server": "node r-observe/mcp/server.js",
     "discovery:test": "npm --prefix ./r-observe/discovery test",
     "discovery:lint": "bash ./scripts/discovery/discovery-lint.sh",
     "discovery:smoke": "bash ./scripts/discovery/discovery-smoke.sh",
