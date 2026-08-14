@@ -35,7 +35,7 @@ const { startScheduler } = require('./schedulers/scan-scheduler');
 const { startRetention } = require('./retention');
 const { startRunRecovery } = require('./run-recovery');
 const { calcNextRun } = require('./schedulers/scan-scheduler');
-const { handleAgentRegister, handleAgentHeartbeat, handleAgentReport } = require('./scanners/agents');
+const { handleAgentRegister, handleAgentHeartbeat, handleAgentReport, startAgent } = require('./scanners/agents');
 
 const PORT = parseInt(process.env.PORT || '3010', 10);
 const SCAN_QUEUE_ENABLED = process.env.DISCOVERY_SCAN_QUEUE_ENABLED !== 'false';
@@ -1147,6 +1147,20 @@ if (AGENT_OFFLINE_CHECK_ENABLED && db) {
   const { startOfflineDetection, stopOfflineDetection } = require('./scanners/agents');
   startOfflineDetection(db, redis);
   lifecycle.addCloser('agentOfflineDetection', () => { try { stopOfflineDetection(); } catch (_) {} });
+}
+
+// ── Auto-registro do discovery central como agente ─────────────────────
+const DISCOVERY_AGENT_ENABLED = process.env.DISCOVERY_AGENT_ENABLED !== 'false';
+if (DISCOVERY_AGENT_ENABLED && db) {
+  const { discoverLocalSubnets } = require('./scanners/subnet-auto');
+  discoverLocalSubnets()
+    .then((subs) => {
+      const subnets = (subs || []).map((s) => s.cidr).filter(Boolean);
+      const stopAgent = startAgent({ subnets });
+      lifecycle.addCloser('selfAgent', () => { try { stopAgent(); } catch (_) {} });
+      log('info', 'Discovery self-agent enabled', { subnets });
+    })
+    .catch((e) => log('warn', 'Self-agent subnet discovery failed', { err: e.message }));
 }
 lifecycle.start();
 
