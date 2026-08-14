@@ -2,6 +2,7 @@
 
 const { sendWhatsAppMessage } = require('../shared/whatsapp');
 const { createWhatsAppMessageLog } = require('../shared/whatsapp-message-log');
+const { createWhatsAppConnectionLog } = require('../shared/whatsapp-connection-log');
 
 function severityEnabled(filter, severity) {
   if (filter === 'all') return true;
@@ -11,6 +12,7 @@ function severityEnabled(filter, severity) {
 
 function createWhatsAppNotifier({ db, log, qr = null }) {
   const msgLog = createWhatsAppMessageLog({ db, log });
+  const connLog = createWhatsAppConnectionLog({ db, log });
 
   async function getConfig() {
     try {
@@ -46,9 +48,11 @@ function createWhatsAppNotifier({ db, log, qr = null }) {
           const res = await qr.sendText(cfg.recipient, text);
           if (!res || res.ok !== true) throw new Error((res && (res.message || res.error)) || 'qr_send_failed');
           await msgLog.record({ direction: 'out', kind: 'incident_notification', channel: 'qr', phone: cfg.recipient, body: text, status: 'sent', metaMessageId: res.externalMessageId || null, incidentId: incident.id || null });
+          await connLog.record({ channel: 'qr', event: 'send_qr_ok', detail: `to=${cfg.recipient}` });
           log('info', 'WhatsApp notification sent (QR)', { incident_id: incident.id, severity: incident.severity });
         } catch (sendErr) {
           await msgLog.record({ direction: 'out', kind: 'incident_notification', channel: 'qr', phone: cfg.recipient || null, body: text, status: 'failed', error: sendErr.message, incidentId: incident.id || null });
+          await connLog.record({ channel: 'qr', event: 'send_qr_fail', detail: `to=${cfg.recipient || '—'} err=${sendErr.message}` });
           log('warn', 'WhatsApp QR notification failed', { incident_id: incident.id, err: sendErr.message });
         }
         return;
@@ -62,9 +66,11 @@ function createWhatsAppNotifier({ db, log, qr = null }) {
           text,
         });
         await msgLog.record({ direction: 'out', kind: 'incident_notification', phone: cfg.recipient, body: text, status: 'sent', metaMessageId: sent.message_id, incidentId: incident.id || null });
+        await connLog.record({ channel: 'cloud', event: 'send_cloud_ok', detail: `to=${cfg.recipient} http=${sent.status || '—'}` });
         log('info', 'WhatsApp notification sent', { incident_id: incident.id, severity: incident.severity });
       } catch (sendErr) {
         await msgLog.record({ direction: 'out', kind: 'incident_notification', phone: cfg.recipient, body: text, status: 'failed', error: sendErr.message, incidentId: incident.id || null });
+        await connLog.record({ channel: 'cloud', event: 'send_cloud_fail', detail: `to=${cfg.recipient || '—'} err=${sendErr.message}` });
         throw sendErr;
       }
     } catch (e) {

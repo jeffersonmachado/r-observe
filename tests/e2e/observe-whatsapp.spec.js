@@ -93,6 +93,29 @@ test.describe('R-Observe · integração WhatsApp', () => {
     expect(typeof body.status).toBe('string');
   });
 
+  test('seção Log de conexões é exibida na aba WhatsApp e o endpoint responde', async ({ page }) => {
+    await openWhatsAppTab(page);
+
+    await expect(page.locator('#wa-conn-channel')).toBeVisible();
+    const box = page.locator('#wa-conn-log');
+    await expect(box).toBeVisible();
+    // Com eventos: tabela com as colunas do log. Sem eventos: hint informativo.
+    const table = box.locator('table');
+    await expect.poll(async () => (await table.count()) || ((await box.textContent()) || ''), { timeout: 15000 })
+      .toBeTruthy();
+    if (await table.count()) {
+      await expect(table.first()).toContainText('Quando');
+      await expect(table.first()).toContainText('Evento');
+    } else {
+      await expect(box).toContainText(/Nenhum evento|Falha ao carregar/);
+    }
+
+    const resp = await page.request.get('/observe/api/system/whatsapp/connections/log?limit=50');
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(Array.isArray(body.events)).toBe(true);
+  });
+
   test('modal de teste abre e cancela sem enviar', async ({ page }) => {    await openWhatsAppTab(page);
     await page.locator('#wa-test-btn').click();
     await expect(page.locator('#wa-test-modal')).toBeVisible();

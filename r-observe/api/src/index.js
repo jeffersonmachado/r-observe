@@ -26,6 +26,7 @@ const { createAIChatClient } = require('./services/ai-client');
 const { createRagContext } = require('./services/rag-context');
 const { sendWhatsAppMessage, validateAccessToken } = require('./shared/whatsapp');
 const { createWhatsAppMessageLog } = require('./shared/whatsapp-message-log');
+const { createWhatsAppConnectionLog } = require('./shared/whatsapp-connection-log');
 const { createLifecycle } = require('./shared/lifecycle');
 const { createHttpErrorHandler } = require('./shared/http-error-handler');
 const { createAuditMiddleware } = require('./audit');
@@ -295,6 +296,7 @@ const {
 const whatsappSettings = createWhatsAppSettingsService({ db, log });
 const whatsappQr = createWhatsAppQrService({ db, log });
 const whatsappMsgLog = createWhatsAppMessageLog({ db, log });
+const whatsappConnLog = createWhatsAppConnectionLog({ db, log });
 const aiChatClient = createAIChatClient({
   aiServiceUrl: process.env.AI_SERVICE_URL || 'http://r-observe-ai:3000',
   signToken: signInternalToken,
@@ -1316,9 +1318,11 @@ app.post(`${BASE}/system/whatsapp/test`, requireAuth, requireAdmin, requireAdmin
       });
     } catch (sendErr) {
       await whatsappMsgLog.record({ direction: 'out', kind: 'test_send', phone: to, body: text, status: 'failed', error: sendErr.message });
+      await whatsappConnLog.record({ channel: 'cloud', event: 'send_cloud_fail', detail: `to=${to} err=${sendErr.message}` });
       throw sendErr;
     }
     await whatsappMsgLog.record({ direction: 'out', kind: 'test_send', phone: to, body: text, status: 'sent', metaMessageId: result.message_id });
+    await whatsappConnLog.record({ channel: 'cloud', event: 'send_cloud_ok', detail: `to=${to} http=${result.status || '—'}` });
     res.json({ ok: true, ...result });
   } catch (e) {
     res.status(502).json({ error: e.message });
@@ -1336,9 +1340,11 @@ app.get(`${BASE}/system/whatsapp/qr/status`, requireAuth, requireAdmin, async (_
   }
 });
 
-app.post(`${BASE}/system/whatsapp/qr/connect`, requireAuth, requireAdmin, requireAdminWrite, async (_req, res) => {
+app.post(`${BASE}/system/whatsapp/qr/connect`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
   try {
-    res.json(await whatsappQr.connect());
+    const status = await whatsappQr.connect();
+    await whatsappConnLog.record({ channel: 'qr', event: 'connect_requested', detail: req.auth && req.auth.user ? `user=${req.auth.user}` : null });
+    res.json(status);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1346,7 +1352,23 @@ app.post(`${BASE}/system/whatsapp/qr/connect`, requireAuth, requireAdmin, requir
 
 app.post(`${BASE}/system/whatsapp/qr/disconnect`, requireAuth, requireAdmin, requireAdminWrite, async (req, res) => {
   try {
-    res.json(await whatsappQr.disconnect({ enabled: req.body ? req.body.enabled : undefined }));
+    const disable = !!(req.body && req.body.enabled === false);
+    const status = await whatsappQr.disconnect({ enabled: req.body ? req.body.enabled : undefined });
+    const user = req.auth && req.auth.user ? `user=${req.auth.user}` : null;
+    await whatsappConnLog.record({ channel: 'qr', event: 'disconnect_requested', detail: [user, disable ? 'disabled=true' : null].filter(Boolean).join(' ') || null });
+    res.json(status);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Log persistente de eventos de conexão (ambos os canais): ciclo de vida do
+// QR, comandos aplicados pelo worker e resultados de envio. Filtros
+// whitelistados (channel/event) no helper.
+app.get(`${BASE}/system/whatsapp/connections/log`, requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const events = await whatsappConnLog.listRecent(req.query || {});
+    res.json({ events });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -3073,8 +3095,20 @@ function renderWhatsApp(el){
   el.appendChild(h('div',{className:'panel-title',style:'margin-top:1.5rem'},'Canal QR (alternativo, não-oficial)'));
   el.appendChild(h('div',{className:'hint'},'Conecta um número WhatsApp lendo um QR Code (whatsapp-web.js). Serve como fallback: se a Cloud API acima não estiver configurada, os alertas saem por este canal. O pareamento roda no worker.'));
   el.appendChild(h('div',{id:'wa-qr-box'}));
+  // ── Log de conexões (eventos persistentes dos canais QR/Cloud) ──
+  el.appendChild(h('div',{className:'panel-title',style:'margin-top:1.5rem'},'Log de conexões'));
+  el.appendChild(h('div',{className:'field',style:'display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'},[
+    h('select',{id:'wa-conn-channel',onchange:'loadWaConnLog()',style:'padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;width:auto'},[
+      h('option',{value:''},'Todos os canais'),
+      h('option',{value:'qr'},'QR'),
+      h('option',{value:'cloud'},'Cloud')
+    ]),
+    h('button',{className:'btn btn-secondary',type:'button',title:'Atualizar log',onclick:'loadWaConnLog()'},'↺')
+  ]));
+  el.appendChild(h('div',{id:'wa-conn-log',style:'overflow-x:auto'},'Carregando…'));
   renderWhatsAppQr();
   loadWhatsAppQr();
+  loadWaConnLog();
   document.getElementById('tog-wa_enabled').checked=!!w.enabled;
   document.getElementById('wa-severity').value=w.severity_filter||'critical';
 }
@@ -3132,6 +3166,40 @@ function disconnectWhatsAppQr(disable){
 function toggleWhatsAppQr(){
   const tog=document.getElementById('tog-wa_qr_enabled');
   if(tog&&tog.checked)connectWhatsAppQr();else disconnectWhatsAppQr(true);
+}
+// ── Log de conexões (auditoria de eventos dos canais QR/Cloud) ──
+const WA_CONN_EVENT_LABELS={service_started:'Serviço iniciado',command_applied:'Comando aplicado',connect_requested:'Conexão solicitada',disconnect_requested:'Desconexão solicitada',qr_generated:'QR gerado',status_changed:'Mudança de status',ready:'Pronto (sessão ativa)',error:'Erro',lock_cleared:'Lock do Chrome removido',send_qr_ok:'Envio via QR ok',send_qr_fail:'Envio via QR falhou',send_cloud_ok:'Envio via Cloud ok',send_cloud_fail:'Envio via Cloud falhou'};
+function loadWaConnLog(){
+  const box=document.getElementById('wa-conn-log');
+  if(!box)return;
+  const p=new URLSearchParams({limit:'50',offset:'0'});
+  const ch=document.getElementById('wa-conn-channel');
+  if(ch&&ch.value)p.set('channel',ch.value);
+  fetch(API+'/system/whatsapp/connections/log?'+p.toString(),{headers:getHeaders()}).then(r=>r.json()).then(d=>{
+    renderWaConnLog(box,(d&&d.events)||[]);
+  }).catch(()=>{
+    box.innerHTML='';box.appendChild(h('div',{className:'hint'},'Falha ao carregar o log de conexões.'));
+  });
+}
+function renderWaConnLog(box,events){
+  box.innerHTML='';
+  if(!events.length){box.appendChild(h('div',{className:'hint'},'Nenhum evento de conexão registrado.'));return;}
+  const cellStyle='padding:.35rem .5rem;border-bottom:1px solid var(--border);vertical-align:top;word-break:break-word';
+  const table=h('table',{style:'width:100%;border-collapse:collapse;font-size:.85rem;table-layout:fixed'});
+  const head=h('tr',{style:'text-align:left;color:var(--muted)'});
+  [['Quando','25%'],['Canal','15%'],['Evento','26%'],['Detalhe','34%']].forEach(([t,w])=>head.appendChild(h('th',{style:'padding:.35rem .5rem;border-bottom:1px solid var(--border);width:'+w},t)));
+  table.appendChild(head);
+  events.forEach(ev=>{
+    const tr=h('tr',{});
+    const dt=ev.created_at?new Date(ev.created_at).toLocaleString('pt-BR'):'—';
+    const isFail=ev.event==='error'||/_fail$/.test(ev.event);
+    tr.appendChild(h('td',{style:cellStyle},dt));
+    tr.appendChild(h('td',{style:cellStyle},ev.channel==='qr'?'QR':'Cloud'));
+    tr.appendChild(h('td',{style:cellStyle+';color:'+(isFail?'var(--err)':'var(--text)')},WA_CONN_EVENT_LABELS[ev.event]||ev.event));
+    tr.appendChild(h('td',{style:cellStyle,title:ev.detail||''},ev.detail||'—'));
+    table.appendChild(tr);
+  });
+  box.appendChild(table);
 }
 // ── Mensagens (auditoria WhatsApp) ──
 function renderMessages(el){
@@ -3422,6 +3490,7 @@ setInterval(loadStatus,30000);
 setInterval(()=>{if(_activeSettingsTab==='messages'&&document.getElementById('wa-messages'))loadWhatsAppMessages(true);},30000);
 // Canal QR: enquanto aguarda o pareamento, atualiza status/QR a cada 5s.
 setInterval(()=>{if(_activeSettingsTab==='whatsapp'&&document.getElementById('wa-qr-box')&&_waQr&&_waQr.status==='pairing')loadWhatsAppQr();},5000);
+setInterval(()=>{if(_activeSettingsTab==='whatsapp'&&document.getElementById('wa-conn-log'))loadWaConnLog();},5000);
 loadWhatsApp();
 loadAIStatus();
 </script>

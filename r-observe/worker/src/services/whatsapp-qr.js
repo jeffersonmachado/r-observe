@@ -14,6 +14,7 @@
  */
 
 const { createWhatsAppMessageLog } = require('../shared/whatsapp-message-log');
+const { createWhatsAppConnectionLog } = require('../shared/whatsapp-connection-log');
 
 const DEFAULT_CONNECTION_ID = 'default';
 const DEFAULT_AUTH_PATH = '/var/lib/r-observe/whatsapp-auth';
@@ -55,6 +56,9 @@ function createWhatsAppQrService({
   let timer = null;
   let appliedDesired = null; // último desired_state efetivamente aplicado ao bridge
 
+  // Log persistente de eventos de conexão (nunca lança; falha só gera warn).
+  const connLog = createWhatsAppConnectionLog({ db, log });
+
   async function persist(patch) {
     const sets = [];
     const params = [];
@@ -88,7 +92,14 @@ function createWhatsAppQrService({
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       },
       logger: {
-        info: (msg, extra) => log('info', msg, extra),
+        info: (msg, extra) => {
+          log('info', msg, extra);
+          // O bridge remove locks órfãos do Chrome (SingletonLock etc.) antes do
+          // initialize e avisa só via logger — espelhamos no log persistente.
+          if (msg && String(msg).includes('Lock do Chrome removido')) {
+            connLog.record({ channel: 'qr', event: 'lock_cleared', detail: (extra && extra.lockPath) || null });
+          }
+        },
         warn: (msg, extra) => log('warn', msg, extra),
         error: (msg, extra) => log('error', msg, extra),
         debug: () => {},
@@ -97,8 +108,10 @@ function createWhatsAppQrService({
 
     bridge.on('qr', ({ qrText, qrDataUrl, expiresAt }) => {
       persist({ status: 'pairing', qr_text: qrText, qr_data_url: qrDataUrl, qr_expires_at: expiresAt || null, last_error: null });
+      // Nunca gravar o texto/dataUrl do QR no log — só metadados.
+      connLog.record({ channel: 'qr', event: 'qr_generated', detail: expiresAt ? `expires_at=${expiresAt}` : null });
     });
-    bridge.on('status', ({ status }) => {
+    bridge.on('status', ({ status, reason }) => {
       // QR some da tela quando a sessão conecta de vez.
       const patch = { status };
       if (status === 'ready' || status === 'disconnected') {
@@ -107,9 +120,15 @@ function createWhatsAppQrService({
         patch.qr_expires_at = null;
       }
       persist(patch);
+      connLog.record({ channel: 'qr', event: 'status_changed', detail: `status=${status}${reason ? ` reason=${reason}` : ''}` });
+    });
+    bridge.on('ready', () => {
+      connLog.record({ channel: 'qr', event: 'ready' });
     });
     bridge.on('error', ({ error }) => {
-      persist({ last_error: String(error || 'erro desconhecido').slice(0, 500) });
+      const message = String(error || 'erro desconhecido').slice(0, 500);
+      persist({ last_error: message });
+      connLog.record({ channel: 'qr', event: 'error', detail: message });
     });
     bridge.on('message', ({ from, body }) => {
       createWhatsAppMessageLog({ db, log }).record({
@@ -141,6 +160,7 @@ function createWhatsAppQrService({
     // cada 5s — sem isto, cada poll reentraria aqui e reiniciaria o cliente
     // no meio da inicialização. Em falha, o sync do bridge (30s) retenta.
     appliedDesired = desiredKey;
+    connLog.record({ channel: 'qr', event: 'command_applied', detail: `desired_state=${desiredKey}` });
 
     const b = getBridge();
     if (wantConnected) {
@@ -153,6 +173,7 @@ function createWhatsAppQrService({
         : await b.addConnection({ id: DEFAULT_CONNECTION_ID });
       if (res && res.ok === false) {
         log('warn', 'WhatsApp QR: falha ao conectar', { err: res.error, detail: res.message });
+        connLog.record({ channel: 'qr', event: 'error', detail: `${res.error || 'connect_failed'}${res.message ? `: ${res.message}` : ''}` });
       }
     } else {
       const st = b.getStatus(DEFAULT_CONNECTION_ID);
@@ -185,6 +206,7 @@ function createWhatsAppQrService({
     if (typeof timer.unref === 'function') timer.unref();
     pollOnce().catch(() => {});
     log('info', 'WhatsApp QR: serviço iniciado', { authDataPath, pollMs: intervalMs });
+    connLog.record({ channel: 'qr', event: 'service_started', detail: `authDataPath=${authDataPath} pollMs=${intervalMs}` });
     return true;
   }
 

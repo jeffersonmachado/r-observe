@@ -14,14 +14,20 @@ const CFG_CLOUD = {
 
 function makeDb({ cfg = CFG_CLOUD } = {}) {
   const inserts = [];
+  const connEvents = [];
   return {
     inserts,
+    connEvents,
     async query(sql, params) {
       if (sql.includes('FROM observe_whatsapp_settings')) {
         return { rowCount: cfg ? 1 : 0, rows: cfg ? [cfg] : [] };
       }
       if (sql.includes('INSERT INTO observe_whatsapp_messages')) {
         inserts.push(params);
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.includes('INSERT INTO observe_whatsapp_connection_events')) {
+        connEvents.push(params);
         return { rowCount: 1, rows: [] };
       }
       return { rowCount: 0, rows: [] };
@@ -53,6 +59,11 @@ describe('WhatsApp notifier — fallback de canal', () => {
     assert.equal(db.inserts.length, 1);
     assert.equal(db.inserts[0][8], 'cloud');
     assert.equal(db.inserts[0][4], 'sent');
+    // evento de conexão: envio Cloud ok com status HTTP no detail
+    assert.equal(db.connEvents.length, 1);
+    assert.deepEqual([db.connEvents[0][0], db.connEvents[0][2]], ['cloud', 'send_cloud_ok']);
+    assert.match(db.connEvents[0][3], /to=5511999999999/);
+    assert.match(db.connEvents[0][3], /http=200/);
   });
 
   it('cai para o canal QR quando a Cloud não está configurada e a sessão está pronta', async () => {
@@ -75,6 +86,9 @@ describe('WhatsApp notifier — fallback de canal', () => {
     assert.equal(db.inserts[0][8], 'qr');
     assert.equal(db.inserts[0][4], 'sent');
     assert.equal(db.inserts[0][6], 'qr-1');
+    assert.equal(db.connEvents.length, 1);
+    assert.deepEqual([db.connEvents[0][0], db.connEvents[0][2]], ['qr', 'send_qr_ok']);
+    assert.match(db.connEvents[0][3], /to=5511999999999/);
   });
 
   it('registra falha (channel=qr) quando o envio QR falha', async () => {
@@ -86,6 +100,9 @@ describe('WhatsApp notifier — fallback de canal', () => {
     assert.equal(db.inserts[0][8], 'qr');
     assert.equal(db.inserts[0][4], 'failed');
     assert.match(db.inserts[0][5], /client_not_ready/);
+    assert.equal(db.connEvents.length, 1);
+    assert.deepEqual([db.connEvents[0][0], db.connEvents[0][2]], ['qr', 'send_qr_fail']);
+    assert.match(db.connEvents[0][3], /client_not_ready/);
   });
 
   it('sem Cloud e sem QR pronto, mantém comportamento atual (tenta Cloud e falha)', async () => {
@@ -96,6 +113,23 @@ describe('WhatsApp notifier — fallback de canal', () => {
     assert.equal(db.inserts.length, 1);
     assert.equal(db.inserts[0][8], 'cloud');
     assert.equal(db.inserts[0][4], 'failed');
+    assert.equal(db.connEvents.length, 1);
+    assert.deepEqual([db.connEvents[0][0], db.connEvents[0][2]], ['cloud', 'send_cloud_fail']);
+  });
+
+  it('registra send_cloud_fail com a mensagem da Meta (HTTP) no detail', async () => {
+    const db = makeDb();
+    const notifier = createWhatsAppNotifier({ db, log, qr: null });
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: { message: 'Invalid OAuth access token' } }) });
+    try {
+      await notifier.notifyIncident(incident);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.equal(db.connEvents.length, 1);
+    assert.deepEqual([db.connEvents[0][0], db.connEvents[0][2]], ['cloud', 'send_cloud_fail']);
+    assert.match(db.connEvents[0][3], /Invalid OAuth access token/);
   });
 
   it('não envia nada quando o toggle de notificações está desligado', async () => {
@@ -104,13 +138,16 @@ describe('WhatsApp notifier — fallback de canal', () => {
     const notifier = createWhatsAppNotifier({ db, log, qr });
     await notifier.notifyIncident(incident);
     assert.equal(db.inserts.length, 0);
+    assert.equal(db.connEvents.length, 0);
   });
 });
 
 function makeQrDb({ row = null } = {}) {
   const updates = [];
+  const connEvents = [];
   return {
     updates,
+    connEvents,
     async query(sql, params) {
       if (sql.includes('UPDATE observe_whatsapp_qr_connections')) {
         updates.push({ sql, params });
@@ -120,6 +157,10 @@ function makeQrDb({ row = null } = {}) {
         return { rowCount: row ? 1 : 0, rows: row ? [row] : [] };
       }
       if (sql.includes('INSERT INTO observe_whatsapp_messages')) {
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.includes('INSERT INTO observe_whatsapp_connection_events')) {
+        connEvents.push(params);
         return { rowCount: 1, rows: [] };
       }
       return { rowCount: 0, rows: [] };
@@ -246,5 +287,74 @@ describe('WhatsApp QR service (worker)', () => {
     assert.equal(inserts.length, 1);
     assert.deepEqual([inserts[0][0], inserts[0][1], inserts[0][8]], ['in', 'inbound', 'qr']);
     assert.equal(inserts[0][4], 'received');
+  });
+
+  it('registra ciclo de vida no log de conexões (command_applied, qr, status, ready, error)', async () => {
+    const bridge = fakeBridge();
+    const db = makeQrDb({ row: { enabled: true, desired_state: 'connected' } });
+    const svc = createWhatsAppQrService({ db, log, env: { WHATSAPP_QR_ENABLED: 'true' }, createBridgeImpl: () => bridge });
+    await svc.pollOnce();
+    await new Promise((r) => setImmediate(r));
+
+    // params: [channel, connection_id, event, detail]
+    const events = () => db.connEvents.map((p) => p[2]);
+    assert.ok(events().includes('command_applied'));
+    assert.equal(db.connEvents.find((p) => p[2] === 'command_applied')[3], 'desired_state=connected');
+
+    bridge.emit('qr', { connectionId: 'default', qrText: 'qr-text-secreto', qrDataUrl: 'data:image/png;base64,x', expiresAt: '2026-01-01T00:00:00Z' });
+    bridge.emit('status', { connectionId: 'default', status: 'connected' });
+    bridge.emit('ready', { connectionId: 'default' });
+    bridge.emit('status', { connectionId: 'default', status: 'disconnected', reason: 'NAVIGATION' });
+    bridge.emit('error', { connectionId: 'default', error: 'initialize_failed' });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const qrEv = db.connEvents.find((p) => p[2] === 'qr_generated');
+    assert.ok(qrEv, 'esperava qr_generated');
+    assert.match(qrEv[3], /expires_at=2026-01-01T00:00:00Z/);
+    assert.ok(!qrEv[3].includes('qr-text-secreto'), 'detail não pode conter o texto do QR');
+
+    const stEvents = db.connEvents.filter((p) => p[2] === 'status_changed').map((p) => p[3]);
+    assert.ok(stEvents.some((d) => d === 'status=connected'));
+    assert.ok(stEvents.some((d) => d.includes('status=disconnected') && d.includes('reason=NAVIGATION')));
+
+    assert.ok(events().includes('ready'));
+    const errEv = db.connEvents.find((p) => p[2] === 'error');
+    assert.ok(errEv, 'esperava error');
+    assert.match(errEv[3], /initialize_failed/);
+    // todos no canal qr, conexão default
+    assert.ok(db.connEvents.every((p) => p[0] === 'qr' && p[1] === 'default'));
+  });
+
+  it('registra service_started ao subir o serviço', async () => {
+    const db = makeQrDb();
+    const svc = createWhatsAppQrService({ db, log, env: { WHATSAPP_QR_ENABLED: 'true', WHATSAPP_QR_AUTH_PATH: '/tmp/wa-auth' }, createBridgeImpl: () => fakeBridge(), pollMs: 60000 });
+    assert.equal(svc.start(), true);
+    await svc.stop();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const ev = db.connEvents.find((p) => p[2] === 'service_started');
+    assert.ok(ev, 'esperava service_started');
+    assert.match(ev[3], /authDataPath=\/tmp\/wa-auth/);
+    assert.match(ev[3], /pollMs=60000/);
+  });
+
+  it('registra lock_cleared quando o bridge avisa remoção de lock via logger', async () => {
+    const bridge = fakeBridge();
+    let bridgeOpts = null;
+    const db = makeQrDb({ row: { enabled: true, desired_state: 'connected' } });
+    const svc = createWhatsAppQrService({
+      db, log,
+      env: { WHATSAPP_QR_ENABLED: 'true' },
+      createBridgeImpl: (opts) => { bridgeOpts = opts; return bridge; },
+    });
+    await svc.pollOnce();
+    assert.ok(bridgeOpts && bridgeOpts.logger, 'logger do bridge não capturado');
+    bridgeOpts.logger.info('[whatsapp-qr-bridge] Lock do Chrome removido', { lockPath: '/var/lib/r-observe/whatsapp-auth/session-waqr_default/SingletonLock' });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const ev = db.connEvents.find((p) => p[2] === 'lock_cleared');
+    assert.ok(ev, 'esperava lock_cleared');
+    assert.match(ev[3], /SingletonLock/);
   });
 });
