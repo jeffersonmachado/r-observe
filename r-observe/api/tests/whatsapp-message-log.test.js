@@ -88,4 +88,16 @@ describe('WhatsApp message audit log', () => {
     await audit.listRecent({ direction: 'sideways', kind: 'hack', status: 'weird' });
     assert.doesNotMatch(db.calls[0].sql, /WHERE/);
   });
+
+  it('filtro de status considera recibo correlacionado (status efetivo)', async () => {
+    const db = makeDb();
+    const audit = createWhatsAppMessageLog({ db, log });
+    await audit.listRecent({ status: 'failed' });
+    const { sql, params } = db.calls[0];
+    assert.match(sql, /status = \$1 OR/);
+    assert.match(sql, /EXISTS \(\s*SELECT 1 FROM observe_whatsapp_messages r/);
+    assert.match(sql, /r\.kind = 'status_callback'/);
+    assert.match(sql, /r\.meta_message_id = observe_whatsapp_messages\.meta_message_id/);
+    assert.equal(params[0], 'failed');
+  });
 });

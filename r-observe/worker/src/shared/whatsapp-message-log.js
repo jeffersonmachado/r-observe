@@ -51,7 +51,18 @@ function createWhatsAppMessageLog({ db, log }) {
     }
     if (['received', 'sent', 'failed', 'delivered', 'read'].includes(status)) {
       params.push(status);
-      where.push(`status = $${params.length}`);
+      const statusIdx = params.length;
+      // Status efetivo: o da própria linha (recibos filtrados direto) ou o de um
+      // recibo correlacionado pelo meta_message_id (ex.: mensagem 'sent' cujo
+      // recibo veio 'failed' — a UI a exibe como Falhou).
+      where.push(
+        `(status = $${statusIdx} OR (kind <> 'status_callback' AND meta_message_id IS NOT NULL AND EXISTS (
+           SELECT 1 FROM observe_whatsapp_messages r
+           WHERE r.kind = 'status_callback'
+             AND r.meta_message_id = observe_whatsapp_messages.meta_message_id
+             AND r.status = $${statusIdx}
+         )))`,
+      );
     }
     if (q && String(q).trim()) {
       params.push(`%${String(q).trim().slice(0, 100)}%`);
