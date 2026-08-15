@@ -3125,7 +3125,7 @@ function renderWhatsAppQr(){
   ]));
   if(q.qrDataUrl){
     box.appendChild(h('div',{className:'field'},[
-      h('img',{id:'wa-qr-img',src:q.qrDataUrl,alt:'QR Code do WhatsApp',style:'width:220px;height:220px;background:#fff;padding:.5rem;border:1px solid var(--border);border-radius:4px'}),
+      h('img',{id:'wa-qr-img',src:q.qrDataUrl,alt:'QR Code do WhatsApp',style:'width:340px;height:340px;background:#fff;padding:.75rem;border:1px solid var(--border);border-radius:4px'}),
       h('div',{className:'hint'},'No WhatsApp: Aparelhos conectados → Conectar aparelho → aponte a câmera para o código.'+(q.qrExpiresAt?(' Válido até '+new Date(q.qrExpiresAt).toLocaleTimeString('pt-BR')+'.'):''))
     ]));
   }
@@ -3533,8 +3533,10 @@ loadStatus();
 setInterval(loadStatus,30000);
 // Auto-refresh da auditoria de mensagens quando a aba Mensagens está aberta.
 setInterval(()=>{if(_activeSettingsTab==='messages'&&document.getElementById('wa-messages'))loadWhatsAppMessages(true);},30000);
-// Canal QR: enquanto aguarda o pareamento, atualiza status/QR a cada 5s.
-setInterval(()=>{if(_activeSettingsTab==='whatsapp'&&document.getElementById('wa-qr-box')&&_waQr&&_waQr.status==='pairing')loadWhatsAppQr();},5000);
+// Canal QR: com a aba aberta, atualiza status/QR a cada 5s — inclusive fora
+// de 'pairing': se o cliente cai e volta (LOGOUT/restart do worker), a tela
+// precisa sair sozinha de 'Desconectado' e mostrar o novo QR.
+setInterval(()=>{if(_activeSettingsTab==='whatsapp'&&document.getElementById('wa-qr-box'))loadWhatsAppQr();},5000);
 loadWhatsApp();
 loadAIStatus();
 </script>

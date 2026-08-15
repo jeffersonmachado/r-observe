@@ -44,3 +44,6 @@ test-results/
 secrets/
 jwt_private.pem
 jwt_public.pem
+
+# Cache de runtime do whatsapp-web.js (gerado em execução)
+.wwebjs_cache/

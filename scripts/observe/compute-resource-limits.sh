@@ -70,8 +70,11 @@ main() {
   mem_sm="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 128 * s }')" 64 8192)")"
   mem_md="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 256 * s }')" 128 8192)")"
   mem_lg="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 512 * s }')" 256 8192)")"
-  # XL: worker com Chromium do canal WhatsApp QR (init do WA Web estoura 512M).
-  mem_xl="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 1024 * s }')" 512 8192)")"
+  # XL: worker com Chromium do canal WhatsApp QR. O init do WA Web estoura
+  # 512M e, desde o rollout WA Web 2.3000.1041xxx (jun/2026) + Chrome 146,
+  # o boot+injeção estoura também 1G (OOM kill no memcg confirmado em prod
+  # via dmesg, ago/2026) — por isso a referência subiu para 2G.
+  mem_xl="$(round_mem "$(clamp "$(awk -v s="$scale_mem" 'BEGIN { printf "%.3f", 2048 * s }')" 1024 8192)")"
 
   local lines
   lines="$(cat <<EOF

@@ -14,7 +14,7 @@
 - Os limites de CPU/memória no `docker-compose.observe.yml` referenciam variáveis `OBSERVE_LIMIT_*` (com os valores atuais como default) — **não hardcode novos valores por serviço**.
 - O script `scripts/observe/compute-resource-limits.sh` calcula os limites a partir das características do servidor (CPUs e RAM) e é executado automaticamente a cada deploy (`--write .env.observe`), usando como referência 4 CPUs / 16 GiB.
 - Para testar/forçar manualmente: `OBSERVE_TOTAL_CPUS=8 OBSERVE_TOTAL_MEMORY_MB=32768 bash scripts/observe/compute-resource-limits.sh`.
-- O worker usa o tier `OBSERVE_LIMIT_MEM_XL` (1G na referência 4 CPU/16 GiB): ele hospeda o Chromium do canal WhatsApp QR (whatsapp-web.js), que morre por OOM no init do WA Web com 512M (confirmado em prod via dmesg).
+- O worker usa o tier `OBSERVE_LIMIT_MEM_XL` (2G na referência 4 CPU/16 GiB): ele hospeda o Chromium do canal WhatsApp QR (whatsapp-web.js), que morre por OOM no init do WA Web com 512M e, desde o rollout WA Web 2.3000.1041xxx (jun/2026) + Chrome 146, também com 1G (ambos confirmados em prod via dmesg; sintoma do OOM de 1G: pareamento cai em "auth timeout").
 
 ## Versões da stack (`/observe/versions`)
 

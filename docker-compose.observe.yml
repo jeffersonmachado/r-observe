@@ -247,10 +247,12 @@ services:
       resources:
         limits:
           # MEM_XL: o worker hospeda o Chromium do canal WhatsApp QR
-          # (whatsapp-web.js); o init do WA Web estoura até 512M (OOM kill
-          # confirmado em prod) e picos de init passam de 256M com folga.
+          # (whatsapp-web.js); o init do WA Web estoura até 512M e, desde o
+          # rollout WA Web 2.3000.1041xxx (jun/2026) + Chrome 146, o boot
+          # estoura também 1G (OOM kill no memcg confirmado em prod via
+          # dmesg, ago/2026 — sintoma: pairing cai em "auth timeout").
           cpus: '${OBSERVE_LIMIT_CPU_MED:-0.5}'
-          memory: ${OBSERVE_LIMIT_MEM_XL:-1G}
+          memory: ${OBSERVE_LIMIT_MEM_XL:-2G}
     depends_on:
       r-observe-postgres:
         condition: service_healthy
