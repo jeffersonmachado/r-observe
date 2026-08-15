@@ -47,7 +47,7 @@ function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVer
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     },
-    ...resolveWebVersionOptions({ webVersion, webVersionCacheDir }),
+    ...resolveWebVersionOptions({ webVersion, webVersionCacheDir, dataPath }),
   });
 }
 
