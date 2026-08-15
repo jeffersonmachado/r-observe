@@ -28,7 +28,7 @@ const DEFAULT_POLL_MS = 5000;
  * do node_modules do worker, que tem a dependência real. Lazy: só carrega
  * (puppeteer etc.) quando uma conexão é efetivamente criada.
  */
-function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVersionCacheDir }) {
+function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVersionCacheDir, userAgent }) {
   // eslint-disable-next-line global-require
   const { Client, LocalAuth } = require('whatsapp-web.js');
   // eslint-disable-next-line global-require
@@ -39,6 +39,10 @@ function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVer
     // limitado a 0.5 CPU no container, o boot+injeção do WA Web passa disso
     // e o pareamento morre em "auth timeout" antes de gerar o QR.
     authTimeoutMs: 120000,
+    // userAgent resolvido pelo bridge (default: UA real do Chrome do
+    // container — o spoof nativo da lib, Chrome 101/macOS 10.14, derruba a
+    // sessão minutos após o pareamento desde o endurecimento da Meta).
+    ...(userAgent !== undefined ? { userAgent } : {}),
     puppeteer: puppeteer || {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
@@ -58,6 +62,18 @@ function envWebVersion(env) {
   const raw = env.WHATSAPP_QR_WEB_VERSION;
   if (raw == null || String(raw).trim() === '') return undefined;
   if (String(raw).trim().toLowerCase() === 'latest') return null;
+  return String(raw).trim();
+}
+
+/**
+ * Mapeia a env WHATSAPP_QR_USER_AGENT para a opção userAgent do bridge:
+ *   - não definida/'auto' → UA real do Chrome do container (default);
+ *   - 'default'           → spoof nativo do whatsapp-web.js (escape hatch);
+ *   - qualquer outra      → usada como está.
+ */
+function envUserAgent(env) {
+  const raw = env.WHATSAPP_QR_USER_AGENT;
+  if (raw == null || String(raw).trim() === '') return undefined;
   return String(raw).trim();
 }
 
@@ -119,6 +135,7 @@ function createWhatsAppQrService({
       authDataPath,
       clientFactory: clientFactory || workerClientFactory,
       webVersion: envWebVersion(env),
+      userAgent: envUserAgent(env),
       // Chrome em container com CPU limitada: o init do whatsapp-web.js estoura
       // o protocolTimeout default (180s) do puppeteer.
       puppeteer: {
