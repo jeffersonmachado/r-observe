@@ -45,11 +45,10 @@ function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVer
 
 /**
  * Mapeia a env WHATSAPP_QR_WEB_VERSION para a opção webVersion do bridge:
- *   - não definida      → undefined (pin default do pacote, workaround do bug
- *                         wwebjs#127084 que trava o `ready` nos builds
- *                         2.3000.1041xxx+ do WA Web);
- *   - 'latest'          → null (sem pin; WA Web mais recente);
- *   - qualquer outra    → pin custom (exige <versao>.html no cache local).
+ *   - não definida/'latest' → sem pin (WA Web mais recente — default; o pin de
+ *                             build antigo só funciona enquanto o WhatsApp
+ *                             mantém os assets no CDN);
+ *   - qualquer outra        → pin custom (exige <versao>.html no cache local).
  */
 function envWebVersion(env) {
   const raw = env.WHATSAPP_QR_WEB_VERSION;
