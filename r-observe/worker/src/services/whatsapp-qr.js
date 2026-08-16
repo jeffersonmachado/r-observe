@@ -28,7 +28,7 @@ const DEFAULT_POLL_MS = 5000;
  * do node_modules do worker, que tem a dependência real. Lazy: só carrega
  * (puppeteer etc.) quando uma conexão é efetivamente criada.
  */
-function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVersionCacheDir, userAgent }) {
+function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVersionCacheDir, userAgent, deviceName }) {
   // eslint-disable-next-line global-require
   const { Client, LocalAuth } = require('whatsapp-web.js');
   // eslint-disable-next-line global-require
@@ -43,6 +43,10 @@ function workerClientFactory({ clientId, dataPath, puppeteer, webVersion, webVer
     // container — o spoof nativo da lib, Chrome 101/macOS 10.14, derruba a
     // sessão minutos após o pareamento desde o endurecimento da Meta).
     ...(userAgent !== undefined ? { userAgent } : {}),
+    // Nome do aparelho sugerido no pareamento (o WhatsApp não devolve à
+    // sessão o nome exibido em "Aparelhos conectados" — sem fixá-lo, a
+    // sessão fica indistinguível de outras no celular do usuário).
+    ...(deviceName ? { deviceName } : {}),
     puppeteer: puppeteer || {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
@@ -74,6 +78,17 @@ function envWebVersion(env) {
 function envUserAgent(env) {
   const raw = env.WHATSAPP_QR_USER_AGENT;
   if (raw == null || String(raw).trim() === '') return undefined;
+  return String(raw).trim();
+}
+
+/**
+ * Nome do aparelho sugerido no pareamento (env WHATSAPP_QR_DEVICE_NAME;
+ * default 'R-Observe'). Só vale para NOVOS pareamentos — sessões já
+ * pareadas mantêm o nome registrado na Meta no momento do scan.
+ */
+function envDeviceName(env) {
+  const raw = env.WHATSAPP_QR_DEVICE_NAME;
+  if (raw == null || String(raw).trim() === '') return 'R-Observe';
   return String(raw).trim();
 }
 
@@ -136,6 +151,7 @@ function createWhatsAppQrService({
       clientFactory: clientFactory || workerClientFactory,
       webVersion: envWebVersion(env),
       userAgent: envUserAgent(env),
+      deviceName: envDeviceName(env),
       // Chrome em container com CPU limitada: o init do whatsapp-web.js estoura
       // o protocolTimeout default (180s) do puppeteer.
       puppeteer: {
@@ -267,7 +283,7 @@ function createWhatsAppQrService({
     if (typeof timer.unref === 'function') timer.unref();
     pollOnce().catch(() => {});
     log('info', 'WhatsApp QR: serviço iniciado', { authDataPath, pollMs: intervalMs });
-    connLog.record({ channel: 'qr', event: 'service_started', detail: `authDataPath=${authDataPath} pollMs=${intervalMs}` });
+    connLog.record({ channel: 'qr', event: 'service_started', detail: `authDataPath=${authDataPath} pollMs=${intervalMs} deviceName=${envDeviceName(env)}` });
     return true;
   }
 

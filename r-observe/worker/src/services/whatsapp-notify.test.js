@@ -381,6 +381,19 @@ describe('WhatsApp QR service (worker)', () => {
     assert.ok(ev, 'esperava service_started');
     assert.match(ev[3], /authDataPath=\/tmp\/wa-auth/);
     assert.match(ev[3], /pollMs=60000/);
+    assert.match(ev[3], /deviceName=R-Observe/);
+  });
+
+  it('repassa deviceName da env ao bridge (WHATSAPP_QR_DEVICE_NAME)', async () => {
+    let bridgeOpts = null;
+    const db = makeQrDb({ row: { enabled: true, desired_state: 'connected' } });
+    const svc = createWhatsAppQrService({
+      db, log,
+      env: { WHATSAPP_QR_ENABLED: 'true', WHATSAPP_QR_DEVICE_NAME: 'R-Observe Prod' },
+      createBridgeImpl: (opts) => { bridgeOpts = opts; return fakeBridge(); },
+    });
+    await svc.pollOnce();
+    assert.equal(bridgeOpts.deviceName, 'R-Observe Prod');
   });
 
   it('registra lock_cleared quando o bridge avisa remoção de lock via logger', async () => {
