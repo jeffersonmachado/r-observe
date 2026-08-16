@@ -17,7 +17,7 @@ function createWhatsAppNotifier({ db, log, qr = null }) {
   async function getConfig() {
     try {
       const r = await db.query(
-        'SELECT enabled, access_token, phone_number_id, recipient, severity_filter FROM observe_whatsapp_settings WHERE id = 1',
+        'SELECT enabled, access_token, phone_number_id, recipient, severity_filter, prefer_qr FROM observe_whatsapp_settings WHERE id = 1',
       );
       return r.rowCount ? r.rows[0] : null;
     } catch (e) {
@@ -36,11 +36,16 @@ function createWhatsAppNotifier({ db, log, qr = null }) {
       const causeLine = incident.cause ? `\nCausa: ${incident.cause}` : '';
       const text = `${icon} *R-Observe*\n${incident.title}\nSeveridade: ${incident.severity}${causeLine}`;
 
-      // Canal: Cloud API quando configurada; senão, fallback para o canal QR
-      // (bridge no worker) se a sessão estiver pronta. O destinatário do QR é
-      // o mesmo `recipient` das settings (normalizado para @c.us pelo bridge).
+      // Canal: QR quando prefer_qr (explícito) ou quando a Cloud não está
+      // configurada — desde que a sessão QR esteja pronta. A preferência
+      // explícita existe porque a Cloud aceita o envio (http 200) mesmo
+      // quando a Meta bloqueia a entrega depois (ex.: erro 130497, conta
+      // restrita ao país) — fallback por falha de envio não captura isso.
+      // O destinatário do QR é o mesmo `recipient` das settings (normalizado
+      // para @c.us pelo bridge).
       const cloudConfigured = !!(cfg.access_token && cfg.phone_number_id && cfg.recipient);
-      const useQr = !cloudConfigured && !!qr && qr.qrReady();
+      const qrAvailable = !!qr && qr.qrReady();
+      const useQr = qrAvailable && (cfg.prefer_qr === true || !cloudConfigured);
 
       if (useQr) {
         try {

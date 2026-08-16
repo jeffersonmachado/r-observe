@@ -91,6 +91,50 @@ describe('WhatsApp notifier — fallback de canal', () => {
     assert.match(db.connEvents[0][3], /to=5511999999999/);
   });
 
+  it('usa QR quando prefer_qr=true mesmo com a Cloud configurada', async () => {
+    const db = makeDb({ cfg: { ...CFG_CLOUD, prefer_qr: true } });
+    const sent = [];
+    const qr = { qrReady: () => true, sendText: async (to, text) => { sent.push({ to, text }); return { ok: true, externalMessageId: 'qr-pref' }; } };
+    const notifier = createWhatsAppNotifier({ db, log, qr });
+
+    const originalFetch = global.fetch;
+    global.fetch = async () => { throw new Error('não deveria chamar a Meta'); };
+    try {
+      await notifier.notifyIncident(incident);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.equal(sent.length, 1);
+    assert.equal(db.inserts.length, 1);
+    assert.equal(db.inserts[0][8], 'qr');
+    assert.equal(db.inserts[0][4], 'sent');
+    assert.equal(db.inserts[0][6], 'qr-pref');
+    assert.equal(db.connEvents.length, 1);
+    assert.deepEqual([db.connEvents[0][0], db.connEvents[0][2]], ['qr', 'send_qr_ok']);
+  });
+
+  it('prefer_qr=true sem sessão QR pronta cai para a Cloud', async () => {
+    const db = makeDb({ cfg: { ...CFG_CLOUD, prefer_qr: true } });
+    const qr = { qrReady: () => false, sendText: async () => { throw new Error('não deveria usar QR'); } };
+    const notifier = createWhatsAppNotifier({ db, log, qr });
+
+    const calls = [];
+    const originalFetch = global.fetch;
+    global.fetch = async (url, opts) => {
+      calls.push({ url, opts });
+      return { ok: true, status: 200, json: async () => ({ messages: [{ id: 'wamid.fallback' }] }) };
+    };
+    try {
+      await notifier.notifyIncident(incident);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.equal(calls.length, 1);
+    assert.equal(db.inserts.length, 1);
+    assert.equal(db.inserts[0][8], 'cloud');
+    assert.equal(db.inserts[0][4], 'sent');
+  });
+
   it('registra falha (channel=qr) quando o envio QR falha', async () => {
     const db = makeDb({ cfg: { ...CFG_CLOUD, access_token: null, phone_number_id: null } });
     const qr = { qrReady: () => true, sendText: async () => ({ ok: false, error: 'client_not_ready' }) };

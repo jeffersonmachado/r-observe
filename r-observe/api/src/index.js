@@ -3027,7 +3027,7 @@ function renderCerts(el){
 }
 
 // ── WhatsApp Tab ──
-let _whatsapp={enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false,webhook_verify_token:'',app_secret_set:false,webhook_path:'/observe/api/whatsapp/webhook'};
+let _whatsapp={enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false,prefer_qr:false,webhook_verify_token:'',app_secret_set:false,webhook_path:'/observe/api/whatsapp/webhook'};
 function renderWhatsApp(el){
   const w=_whatsapp||{};
   el.innerHTML='';
@@ -3123,6 +3123,13 @@ function renderWhatsAppQr(){
     h('button',{className:'btn btn-secondary',type:'button',id:'wa-qr-connect-btn',onclick:'connectWhatsAppQr()'},'Conectar / Gerar QR'),
     h('button',{className:'btn btn-secondary',type:'button',id:'wa-qr-disconnect-btn',onclick:'disconnectWhatsAppQr(false)'},'Desconectar')
   ]));
+  box.appendChild(h('div',{className:'field'},[
+    h('label',{className:'toggle-switch',style:'display:inline-flex;align-items:center;gap:.6rem;cursor:pointer'},[
+      h('input',{type:'checkbox',id:'tog-wa_prefer_qr',onchange:'preferWhatsAppQr()'}),
+      h('span',{className:'toggle-slider'})
+    ]),
+    h('div',{className:'toggle-desc'},'Preferir o canal QR para as notificações (mesmo com a Cloud API configurada). Útil quando a Meta bloqueia a entrega apesar do envio aceito (ex.: erro 130497).')
+  ]));
   if(q.qrDataUrl){
     box.appendChild(h('div',{className:'field'},[
       h('img',{id:'wa-qr-img',src:q.qrDataUrl,alt:'QR Code do WhatsApp',style:'width:340px;height:340px;background:#fff;padding:.75rem;border:1px solid var(--border);border-radius:4px'}),
@@ -3132,6 +3139,17 @@ function renderWhatsAppQr(){
   if(q.lastError)box.appendChild(h('div',{className:'field',id:'wa-qr-error',style:'color:var(--err);font-size:.85rem'},'Último erro: '+q.lastError));
   const tog=document.getElementById('tog-wa_qr_enabled');
   if(tog)tog.checked=!!q.enabled;
+  const togPrefer=document.getElementById('tog-wa_prefer_qr');
+  if(togPrefer)togPrefer.checked=!!(_whatsapp&&_whatsapp.prefer_qr);
+}
+function preferWhatsAppQr(){
+  const tog=document.getElementById('tog-wa_prefer_qr');
+  const prefer=!!(tog&&tog.checked);
+  fetch(API+'/system/whatsapp',{method:'PUT',headers:getHeaders(),body:JSON.stringify({prefer_qr:prefer})}).then(r=>r.json()).then(d=>{
+    if(d&&d.error){showToast('Falha ao salvar preferência: '+d.error,'err');if(tog)tog.checked=!prefer;return;}
+    if(d)_whatsapp={..._whatsapp,...d};
+    showToast(prefer?'Notificações sairão pelo canal QR':'Notificações voltam à Cloud API (quando configurada)','ok');
+  }).catch(e=>{showToast('Falha ao salvar preferência: '+e.message,'err');if(tog)tog.checked=!prefer;});
 }
 function loadWhatsAppQr(){
   fetch(API+'/system/whatsapp/qr/status',{headers:getHeaders()}).then(r=>r.json()).then(d=>{
@@ -3364,7 +3382,7 @@ function renderWhatsAppMessages(box){
 }
 function loadWhatsApp(){
   fetch(API+'/system/whatsapp',{headers:getHeaders()}).then(r=>r.json()).then(d=>{
-    _whatsapp=(d&&!d.error)?d:{enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false,webhook_verify_token:'',app_secret_set:false,webhook_path:'/observe/api/whatsapp/webhook'};
+    _whatsapp=(d&&!d.error)?d:{enabled:false,phone_number_id:'',recipient:'',severity_filter:'critical',token_set:false,prefer_qr:false,webhook_verify_token:'',app_secret_set:false,webhook_path:'/observe/api/whatsapp/webhook'};
     if(_activeSettingsTab==='whatsapp') renderWhatsApp(document.getElementById('settings-panel'));
   }).catch(e=>{ if(_activeSettingsTab==='whatsapp') showFeedback('Falha ao carregar WhatsApp: '+e.message,false); });
 }
