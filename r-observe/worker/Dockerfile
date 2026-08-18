@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 \
     libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 \
     libxfixes3 libxi6 libxkbcommon0 libxrandr2 libxrender1 libxss1 libxtst6 \
-    xvfb xauth \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PUPPETEER_SKIP_DOWNLOAD=true \
@@ -45,8 +45,10 @@ ENV PUPPETEER_EXECUTABLE_PATH=/opt/puppeteer-cache/chrome/linux-146.0.7680.153/c
 
 COPY r-observe/r-observe/worker/src/   ./src/
 COPY r-observe/r-observe/shared/       ./shared/
+COPY r-observe/r-observe/worker/docker-entrypoint-xvfb.sh /usr/local/bin/docker-entrypoint-xvfb.sh
 
 RUN mkdir -p /app/data/evidence /app/data/replays /app/logs /var/lib/r-observe/whatsapp-auth \
+    && chmod +x /usr/local/bin/docker-entrypoint-xvfb.sh \
     && chown -R node:node /app/data /app/logs /var/lib/r-observe/whatsapp-auth
 
 USER node
@@ -60,4 +62,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=5 \
 # Desde ago/2026 a Meta detecta e derruba sessões wwebjs headless ~1-2 min após
 # o pareamento (issue whatsapp-web.js #201894); com display real a sessão fica.
 # WHATSAPP_QR_HEADLESS=false no .env.observe ativa o modo (default é true).
-CMD ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", "node", "--require", "./src/tracing.js", "src/index.js"]
+# O entrypoint próprio é usado em vez do xvfb-run, que trava como PID 1.
+CMD ["docker-entrypoint-xvfb.sh"]

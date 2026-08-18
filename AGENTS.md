@@ -15,7 +15,7 @@
 - O script `scripts/observe/compute-resource-limits.sh` calcula os limites a partir das características do servidor (CPUs e RAM) e é executado automaticamente a cada deploy (`--write .env.observe`), usando como referência 4 CPUs / 16 GiB.
 - Para testar/forçar manualmente: `OBSERVE_TOTAL_CPUS=8 OBSERVE_TOTAL_MEMORY_MB=32768 bash scripts/observe/compute-resource-limits.sh`.
 - O worker usa o tier `OBSERVE_LIMIT_MEM_XL` (2G na referência 4 CPU/16 GiB): ele hospeda o Chromium do canal WhatsApp QR (whatsapp-web.js), que morre por OOM no init do WA Web com 512M e, desde o rollout WA Web 2.3000.1041xxx (jun/2026) + Chrome 146, também com 1G (ambos confirmados em prod via dmesg; sintoma do OOM de 1G: pareamento cai em "auth timeout").
-- O Chrome do canal WhatsApp QR roda em produção com `WHATSAPP_QR_HEADLESS=false` sob Xvfb (`xvfb-run` no CMD do `r-observe/worker/Dockerfile`): desde ago/2026 a Meta detecta e derruba sessões wwebjs headless ~1-2 min após o pareamento (LOGOUT silencioso; issue whatsapp-web.js #201894). Em dev local sem X, manter o default `WHATSAPP_QR_HEADLESS=true`.
+- O Chrome do canal WhatsApp QR roda em produção com `WHATSAPP_QR_HEADLESS=false` sob Xvfb (`docker-entrypoint-xvfb.sh` no CMD do `r-observe/worker/Dockerfile` — não usar `xvfb-run`, que trava como PID 1 do container): desde ago/2026 a Meta detecta e derruba sessões wwebjs headless ~1-2 min após o pareamento (LOGOUT silencioso; issue whatsapp-web.js #201894). Em dev local sem X, manter o default `WHATSAPP_QR_HEADLESS=true`.
 
 ## Versões da stack (`/observe/versions`)
 
