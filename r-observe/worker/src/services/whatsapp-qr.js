@@ -228,6 +228,19 @@ function createWhatsAppQrService({
         phone: from || null, body: body || null, status: 'received',
       });
     });
+    // Recibos do canal QR (✓ enviado / ✓✓ entregue / ✓✓ azul lido): o ack
+    // numérico do wwebjs vira status_callback com o mesmo meta_message_id
+    // gravado no envio (externalMessageId = id serializado), permitindo à UI
+    // correlacionar o recibo à mensagem original (auditoria).
+    const QR_ACK_STATUS = { 1: 'sent', 2: 'delivered', 3: 'read', 4: 'read' };
+    bridge.on('ack', ({ messageId, ack }) => {
+      const status = QR_ACK_STATUS[ack];
+      if (!status || !messageId) return;
+      createWhatsAppMessageLog({ db, log }).record({
+        direction: 'out', kind: 'status_callback', channel: 'qr',
+        status, metaMessageId: messageId,
+      });
+    });
     return bridge;
   }
 

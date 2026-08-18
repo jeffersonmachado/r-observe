@@ -175,3 +175,59 @@ describe('WhatsApp QR — WHATSAPP_QR_HEADLESS', () => {
     assert.equal(p.headless, true);
   });
 });
+
+describe('WhatsApp QR — recibos (message_ack → status_callback)', () => {
+  function makeDbWithMessages() {
+    const db = makeDb();
+    db.messages = [];
+    const origQuery = db.query.bind(db);
+    db.query = async (sql, params) => {
+      if (/INSERT INTO observe_whatsapp_messages/.test(sql)) {
+        db.messages.push({
+          direction: params[0], kind: params[1], status: params[4],
+          metaMessageId: params[6], channel: params[8],
+        });
+      }
+      return origQuery(sql, params);
+    };
+    return db;
+  }
+
+  it('ack 1/2/3/4 gravam status_callback com o meta_message_id do envio', async () => {
+    const db = makeDbWithMessages();
+    const bridge = makeFakeBridge();
+    const svc = createWhatsAppQrService({
+      db, log: () => {}, env: { WHATSAPP_QR_ENABLED: 'true' }, createBridgeImpl: () => bridge,
+    });
+    await svc.pollOnce();
+    await flush();
+
+    bridge.emit('ack', { messageId: 'true_5511@c.us_ABC', ack: 1 });
+    bridge.emit('ack', { messageId: 'true_5511@c.us_ABC', ack: 2 });
+    bridge.emit('ack', { messageId: 'true_5511@c.us_ABC', ack: 3 });
+    bridge.emit('ack', { messageId: 'true_5511@c.us_ABC', ack: 4 });
+    await flush();
+
+    const callbacks = db.messages.filter((m) => m.kind === 'status_callback');
+    assert.deepEqual(callbacks.map((m) => m.status), ['sent', 'delivered', 'read', 'read']);
+    assert.ok(callbacks.every((m) => m.metaMessageId === 'true_5511@c.us_ABC'));
+    assert.ok(callbacks.every((m) => m.channel === 'qr' && m.direction === 'out'));
+  });
+
+  it('ack desconhecido ou sem messageId não grava nada', async () => {
+    const db = makeDbWithMessages();
+    const bridge = makeFakeBridge();
+    const svc = createWhatsAppQrService({
+      db, log: () => {}, env: { WHATSAPP_QR_ENABLED: 'true' }, createBridgeImpl: () => bridge,
+    });
+    await svc.pollOnce();
+    await flush();
+
+    bridge.emit('ack', { messageId: 'true_5511@c.us_ABC', ack: 0 });
+    bridge.emit('ack', { messageId: 'true_5511@c.us_ABC', ack: -1 });
+    bridge.emit('ack', { messageId: null, ack: 2 });
+    await flush();
+
+    assert.equal(db.messages.filter((m) => m.kind === 'status_callback').length, 0);
+  });
+});
