@@ -289,6 +289,9 @@ services:
       # ── WhatsApp QR (canal alternativo não-oficial, via worker) ─────────────
       WHATSAPP_QR_ENABLED: ${WHATSAPP_QR_ENABLED:-false}
       WHATSAPP_QR_AUTH_PATH: ${WHATSAPP_QR_AUTH_PATH:-/var/lib/r-observe/whatsapp-auth}
+      # headless=false em produção (Meta derruba sessões headless — issue
+      # wwebjs #201894); o Chrome roda sob Xvfb no CMD do Dockerfile do worker.
+      WHATSAPP_QR_HEADLESS: ${WHATSAPP_QR_HEADLESS:-true}
       # ── Remediação com supervisão por score ───────────────────────────────────
       REMEDIATION_ENABLED: ${REMEDIATION_ENABLED:-true}
       # Score mínimo para execução automática (0.0–1.0). Padrão conservador: 0.85
