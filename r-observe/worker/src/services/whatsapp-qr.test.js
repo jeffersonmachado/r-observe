@@ -143,3 +143,35 @@ describe('WhatsApp QR — dedupe do log de conexões', () => {
     assert.ok(updates.length >= 2);
   });
 });
+
+describe('WhatsApp QR — WHATSAPP_QR_HEADLESS', () => {
+  async function capturePuppeteer(env) {
+    const db = makeDb();
+    let opts = null;
+    const bridge = makeFakeBridge();
+    const svc = createWhatsAppQrService({
+      db,
+      log: () => {},
+      env: { WHATSAPP_QR_ENABLED: 'true', ...env },
+      createBridgeImpl: (o) => { opts = o; return bridge; },
+    });
+    await svc.pollOnce();
+    await flush();
+    return opts.puppeteer;
+  }
+
+  it('default é headless:true (sem env)', async () => {
+    const p = await capturePuppeteer({});
+    assert.equal(p.headless, true);
+  });
+
+  it("WHATSAPP_QR_HEADLESS=false liga modo com display (Xvfb)", async () => {
+    const p = await capturePuppeteer({ WHATSAPP_QR_HEADLESS: 'false' });
+    assert.equal(p.headless, false);
+  });
+
+  it('qualquer outro valor mantém headless:true', async () => {
+    const p = await capturePuppeteer({ WHATSAPP_QR_HEADLESS: 'true' });
+    assert.equal(p.headless, true);
+  });
+});

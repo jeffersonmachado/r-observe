@@ -92,6 +92,20 @@ function envDeviceName(env) {
   return String(raw).trim();
 }
 
+/**
+ * Modo headless do Chrome (env WHATSAPP_QR_HEADLESS; default 'true').
+ * 'false' exige um display (no container de produção o worker roda sob Xvfb —
+ * ver o CMD do Dockerfile). Motivo: onda de detecção de headless da Meta
+ * (ago/2026, issue wwebjs #201894) — sessões pareadas com headless:true são
+ * desconectadas (LOGOUT silencioso) ~1-2 min após o ready; com display real
+ * (headless:false) a sessão permanece.
+ */
+function envHeadless(env) {
+  const raw = env.WHATSAPP_QR_HEADLESS;
+  if (raw == null || String(raw).trim() === '') return true;
+  return String(raw).trim().toLowerCase() !== 'false';
+}
+
 function createWhatsAppQrService({
   db,
   log,
@@ -153,9 +167,10 @@ function createWhatsAppQrService({
       userAgent: envUserAgent(env),
       deviceName: envDeviceName(env),
       // Chrome em container com CPU limitada: o init do whatsapp-web.js estoura
-      // o protocolTimeout default (180s) do puppeteer.
+      // o protocolTimeout default (180s) do puppeteer. headless vem da env
+      // (produção roda headless:false sob Xvfb — ver envHeadless).
       puppeteer: {
-        headless: true,
+        headless: envHeadless(env),
         protocolTimeout: 360000,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       },
