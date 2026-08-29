@@ -24,8 +24,8 @@ WORKDIR /app/r-observe/worker
 
 COPY r-observe/r-observe/worker/package*.json ./
 COPY r-observe/packages/auth/ /app/packages/auth/
-# file:../../../packages/whatsapp-qr-bridge resolve para /packages/... no container
-COPY packages/whatsapp-qr-bridge/ /packages/whatsapp-qr-bridge/
+# file:../../packages/whatsapp-qr-bridge resolve para /app/packages/... no container
+COPY r-observe/packages/whatsapp-qr-bridge/ /app/packages/whatsapp-qr-bridge/
 RUN test -f package-lock.json && npm ci --omit=dev && npm cache clean --force
 
 # Download do Chrome for Testing na versão exata (pinada) num cache dir fixo.

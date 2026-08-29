@@ -23,7 +23,7 @@ const DEFAULT_POLL_MS = 5000;
 /**
  * Factory local do client whatsapp-web.js. O pacote bridge é instalado via
  * `file:` e, no container, o Node resolve o require a partir do path real do
- * pacote (/packages/whatsapp-qr-bridge), onde não há node_modules — por isso a
+ * pacote (/app/packages/whatsapp-qr-bridge), onde não há node_modules — por isso a
  * factory padrão não acha o whatsapp-web.js. Aqui o require resolve a partir
  * do node_modules do worker, que tem a dependência real. Lazy: só carrega
  * (puppeteer etc.) quando uma conexão é efetivamente criada.

@@ -216,6 +216,46 @@ function validateImports(rootDir, errors, options = {}) {
   return { packageDirs: packageDirs.map((dir) => path.relative(rootDir, dir)), filesChecked: jsFiles.length };
 }
 
+// Ordena os diretórios de pacote de forma que os alvos de dependências `file:`
+// (ex.: packages/auth, packages/whatsapp-qr-bridge) sejam instalados ANTES dos
+// pacotes que os referenciam. `npm ci` de um pacote com dep `file:` apenas cria
+// o symlink — não instala as dependências transitivas do pacote linkado —, então
+// o alvo precisa ter seu próprio `node_modules` populado primeiro para o
+// `npm ls --all` do dependente não acusar "missing".
+function orderPackageDirsByFileDeps(packageDirs) {
+  const byResolvedPath = new Map();
+  for (const dir of packageDirs) byResolvedPath.set(path.resolve(dir), dir);
+
+  const fileDeps = new Map();
+  for (const dir of packageDirs) {
+    const pkg = readJson(path.join(dir, 'package.json'));
+    const targets = [];
+    for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+      for (const [name, version] of Object.entries(pkg[field] || {})) {
+        if (typeof version === 'string' && version.startsWith('file:')) {
+          const resolved = path.resolve(dir, version.replace(/^file:/, ''));
+          const target = byResolvedPath.get(resolved);
+          if (target && target !== dir) targets.push(target);
+        }
+      }
+    }
+    fileDeps.set(dir, targets);
+  }
+
+  const ordered = [];
+  const state = new Map();
+  const visit = (dir) => {
+    const s = state.get(dir) || 0;
+    if (s === 2 || s === 1) return;
+    state.set(dir, 1);
+    for (const dep of fileDeps.get(dir) || []) visit(dep);
+    state.set(dir, 2);
+    ordered.push(dir);
+  };
+  for (const dir of packageDirs) visit(dir);
+  return ordered;
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const rootDir = path.resolve(args.root);
@@ -271,9 +311,9 @@ function main() {
       }
     }
 
-    const installDirs = packageDirs
-      .filter((dir) => fs.existsSync(path.join(dir, 'package-lock.json')))
-      .sort((a, b) => a.length - b.length);
+    const installDirs = orderPackageDirsByFileDeps(
+      packageDirs.filter((dir) => fs.existsSync(path.join(dir, 'package-lock.json'))),
+    );
 
     for (const dir of installDirs) {
       const lockPath = path.join(dir, 'package-lock.json');

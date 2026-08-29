@@ -66,6 +66,9 @@ packages/auth/package.json
 packages/auth/package-lock.json
 packages/auth/src/index.js
 packages/auth/tests/jwt.test.js
+packages/whatsapp-qr-bridge/package.json
+packages/whatsapp-qr-bridge/package-lock.json
+packages/whatsapp-qr-bridge/src/index.js
 r-observe/ai/src/root-cause-engine/index.js
 r-observe/ai/src/correlation-engine/index.js
 r-observe/ai/src/incident-memory/index.js

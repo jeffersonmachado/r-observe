@@ -1,0 +1,24 @@
+{
+  "name": "@results/whatsapp-qr-bridge",
+  "version": "0.5.4",
+  "description": "Núcleo compartilhado de bridge WhatsApp via QR Code (whatsapp-web.js), multi-conexão, com eventos e injeção de clientFactory para testes",
+  "private": true,
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "peerDependencies": {
+    "whatsapp-web.js": "^1.34.6"
+  },
+  "peerDependenciesMeta": {
+    "whatsapp-web.js": {
+      "optional": true
+    }
+  }
+}

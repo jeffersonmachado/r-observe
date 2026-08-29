@@ -21,7 +21,7 @@
     "@opentelemetry/sdk-node": "^0.221.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "@results/auth": "file:../../packages/auth",
-    "@results/whatsapp-qr-bridge": "file:../../../packages/whatsapp-qr-bridge",
+    "@results/whatsapp-qr-bridge": "file:../../packages/whatsapp-qr-bridge",
     "express": "^4.22.2",
     "ioredis": "^5.3.2",
     "pg": "^8.21.0",
